@@ -101,7 +101,7 @@ def load_and_split_data(file_path, test_size=0.2, seed=42):
     # calculate class weights (gentler since we oversampled)
     counts = np.bincount(np.array(train_labels, dtype=np.int64), minlength=2)
     weights = counts.max() / np.maximum(counts, 1)
-    class_weights = torch.tensor(weights, dtype=torch.float32, device=DEVICE)
+    class_weights = torch.tensor(weights, dtype=torch.float32)
     
     print(f"\nClass weights: {class_weights}")
 
@@ -130,6 +130,9 @@ def main():
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
     
     # use crossentropy instead of focal loss
+    # ensure weights match model dtype and are on correct device
+    model_dtype = next(model.parameters()).dtype
+    class_weights = class_weights.to(DEVICE).to(model_dtype)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     # training loop with early stopping
