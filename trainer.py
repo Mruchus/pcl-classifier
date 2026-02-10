@@ -9,36 +9,16 @@ from torch.optim import AdamW
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, classification_report
 from tqdm import tqdm
+from imblearn.over_sampling import RandomOverSampler
 
 # configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_NAME = "microsoft/deberta-v3-base"
 MAX_LENGTH = 128
 BATCH_SIZE = 16
-LEARNING_RATE = 2e-5 # low LR to prevent forgetting in transformer layers
-EPOCHS = 4
-GAMMA = 2.0 # focal loss hyperparameter
-ALPHA = 1.0 # focal loss scaling
-
-# focal loss implementation
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, weight=None):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.weight = weight
-
-    def forward(self, inputs, targets):
-        weight = None
-        if self.weight is not None:
-            weight = self.weight.to(device=inputs.device, dtype=inputs.dtype)
-
-        # targets are expected to be long/indices
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=weight)
-        pt = torch.exp(-ce_loss)
-        # down-weight easy examples, scale up hard ones
-        focal_loss = self.alpha * (1 - pt)**self.gamma * ce_loss
-        return focal_loss.mean()
+LEARNING_RATE = 2e-5
+EPOCHS = 10  # Increased from 4
+PATIENCE = 3  # Stop if no improvement for 3 epochs
 
 # data preparation
 class PCLDataset(Dataset):
@@ -100,12 +80,29 @@ def load_and_split_data(file_path, test_size=0.2, seed=42):
         stratify=labels
     )
 
-    # class weights for crossentropy/focal loss:
-    # weight[c] = N / (C * count_c)  (inverse frequency, normalised)
+    print(f"Before oversampling - Class distribution:")
+    unique, counts = np.unique(train_labels, return_counts=True)
+    for u, c in zip(unique, counts):
+        print(f"  Class {u}: {c} samples ({c/len(train_labels)*100:.1f}%)")
+
+    # oversample minority class to 50% ratio
+    ros = RandomOverSampler(random_state=seed, sampling_strategy=0.5)
+    train_texts_arr = np.array(train_texts).reshape(-1, 1)
+    train_texts_resampled, train_labels_resampled = ros.fit_resample(train_texts_arr, train_labels)
+    train_texts = train_texts_resampled.flatten().tolist()
+    train_labels = train_labels_resampled.tolist()
+
+    print(f"\nAfter oversampling - Class distribution:")
+    unique, counts = np.unique(train_labels, return_counts=True)
+    for u, c in zip(unique, counts):
+        print(f"  Class {u}: {c} samples ({c/len(train_labels)*100:.1f}%)")
+
+    # calculate class weights (gentler since we oversampled)
     counts = np.bincount(np.array(train_labels, dtype=np.int64), minlength=2)
-    total = counts.sum()
-    weights = total / (2.0 * np.maximum(counts, 1))  # avoid div-by-zero
+    weights = counts.max() / np.maximum(counts, 1)
     class_weights = torch.tensor(weights, dtype=torch.float32, device=DEVICE)
+    
+    print(f"\nClass weights: {class_weights}")
 
     return train_texts, val_texts, train_labels, val_labels, class_weights
 
@@ -131,15 +128,21 @@ def main():
     total_steps = len(train_loader) * EPOCHS
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
     
-    criterion = FocalLoss(alpha=ALPHA, gamma=GAMMA, weight=class_weights)
+    # use crossentropy instead of focal loss
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
 
-    # training loop
+    # training loop with early stopping
+    best_f1 = 0
+    patience_counter = 0
+    
     for epoch in range(EPOCHS):
         model.train()
         total_loss = 0
-        print(f"\n--- Epoch {epoch+1}/{EPOCHS} ---")
+        print(f"\n{'='*60}")
+        print(f"Epoch {epoch+1}/{EPOCHS}")
+        print(f"{'='*60}")
         
-        for batch in tqdm(train_loader):
+        for batch in tqdm(train_loader, desc="Training"):
             optimizer.zero_grad()
             ids = batch['input_ids'].to(DEVICE)
             mask = batch['attention_mask'].to(DEVICE)
@@ -153,11 +156,14 @@ def main():
             scheduler.step()
             total_loss += loss.item()
 
-        # local evaluation
+        avg_loss = total_loss / len(train_loader)
+        print(f"Average training loss: {avg_loss:.4f}")
+
+        # validation
         model.eval()
         all_preds, all_true = [], []
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in tqdm(val_loader, desc="Validating"):
                 ids = batch['input_ids'].to(DEVICE)
                 mask = batch['attention_mask'].to(DEVICE)
                 targets = batch['labels'].to(DEVICE)
@@ -168,12 +174,32 @@ def main():
                 all_true.extend(targets.cpu().numpy())
         
         f1 = f1_score(all_true, all_preds, pos_label=1)
-        print(f"Validation F1 (PCL Class): {f1:.4f}")
+        print(f"\nValidation F1 (PCL Class): {f1:.4f}")
         print(classification_report(all_true, all_preds, target_names=['Non-PCL', 'PCL']))
+        
+        # check for model collapse
+        if f1 == 0:
+            print("⚠️  WARNING: Model collapsed (F1=0)! Stopping training.")
+            break
+        
+        # save best model and early stopping
+        if f1 > best_f1:
+            best_f1 = f1
+            patience_counter = 0
+            model.save_pretrained("BestModel_DeBERTa_Focal")
+            tokenizer.save_pretrained("BestModel_DeBERTa_Focal")
+            print(f"✓ New best F1: {f1:.4f} - Model saved!")
+        else:
+            patience_counter += 1
+            print(f"No improvement. Patience: {patience_counter}/{PATIENCE}")
+            if patience_counter >= PATIENCE:
+                print(f"\nEarly stopping triggered after {epoch+1} epochs")
+                print(f"Best F1 score: {best_f1:.4f}")
+                break
 
-    # save for stage 4/5
-    model.save_pretrained("BestModel_DeBERTa_Focal")
-    tokenizer.save_pretrained("BestModel_DeBERTa_Focal")
+    print(f"\n{'='*60}")
+    print(f"Training complete! Best F1: {best_f1:.4f}")
+    print(f"{'='*60}")
 
 if __name__ == "__main__":
     main()
