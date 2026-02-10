@@ -17,9 +17,9 @@ os.environ['HF_HOME'] = '/tmp/mnn23_hf_cache'
 SEED = 42
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_NAME = "microsoft/deberta-v3-base"
-MAX_LENGTH = 192
+MAX_LENGTH = 256
 BATCH_SIZE = 16
-LR = 2e-5         
+LR = 5e-6        
 EPOCHS = 6
 PATIENCE = 3
 WARMUP_RATIO = 0.1
@@ -88,7 +88,7 @@ def train_one_epoch(model, loader, optimizer, scheduler):
         logits = outputs.logits.float() # Stability fix
         
         # We use standard CrossEntropy because the Sampler balances the batch for us
-        loss = F.cross_entropy(logits, targets)
+        loss = F.cross_entropy(logits, targets, weight=torch.tensor([1.0, 2.0]).to(DEVICE))
 
         if not torch.isfinite(loss):
             continue
