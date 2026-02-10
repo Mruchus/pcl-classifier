@@ -62,30 +62,49 @@ class PCLDataset(Dataset):
             'labels': torch.tensor(self.labels[idx], dtype=torch.long)
         }
 
-def load_and_split_data(file_path):
-    # standard tsv loading for the pcl dataset
-    df = pd.read_csv(file_path, sep='\t', header=None, quoting=3)
-    df.columns = ["row_id", "para_id", "keyword", "country", "text", "label"]
-    
-    # drop rows without text or labels
-    df = df.dropna(subset=['text', 'label'])
-    
-    # binary mapping: 0,1 -> 0; 2,3,4 -> 1
-    df['label_bin'] = df['label'].apply(lambda x: 1 if int(x) >= 2 else 0)
-    
-    train_texts, val_texts, train_labels, val_labels = train_test_split(
-        df['text'].values, 
-        df['label_bin'].values, 
-        test_size=0.2, 
-        stratify=df['label_bin'].values,
-        random_state=42
+def load_and_split_data(file_path, test_size=0.2, seed=42):
+    # load tsv (quoting=3 ignores quotes in text)
+    df = pd.read_csv(
+        file_path,
+        sep="\t",
+        header=None,
+        names=["id", "para_id", "keyword", "country", "text", "label"],
+        engine="python",
+        quoting=3
     )
-    
-    # calculate weights for imbalanced classes (from stage 2 stats)
-    # approx 9:1 ratio -> weight pcl class higher
-    weights = torch.tensor([1.0, 8.5]).to(DEVICE)
-    
-    return train_texts, val_texts, train_labels, val_labels, weights
+
+    # clean
+    df = df.dropna(subset=["text", "label"]).copy()
+    df["text"] = df["text"].astype(str)
+
+    df["label"] = pd.to_numeric(df["label"], errors="coerce")
+    df = df.dropna(subset=["label"]).copy()
+    df["label"] = df["label"].astype(int)
+
+    # binary mapping: 0/1 -> 0, 2/3/4 -> 1
+    df["label_bin"] = (df["label"] >= 2).astype(int)
+
+    texts = df["text"].tolist()
+    labels = df["label_bin"].tolist()
+
+    # split
+    train_texts, val_texts, train_labels, val_labels = train_test_split(
+        texts,
+        labels,
+        test_size=test_size,
+        random_state=seed,
+        stratify=labels
+    )
+
+    # class weights for crossentropy/focal loss:
+    # weight[c] = N / (C * count_c)  (inverse frequency, normalised)
+    counts = np.bincount(np.array(train_labels, dtype=np.int64), minlength=2)
+    total = counts.sum()
+    weights = total / (2.0 * np.maximum(counts, 1))  # avoid div-by-zero
+    class_weights = torch.tensor(weights, dtype=torch.float32, device=DEVICE)
+
+    return train_texts, val_texts, train_labels, val_labels, class_weights
+
 
 # main training execution
 def main():
