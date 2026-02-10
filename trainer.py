@@ -88,7 +88,8 @@ def load_and_split_data(file_path, test_size=0.2, seed=42):
     # oversample minority class to 50% ratio
     ros = RandomOverSampler(random_state=seed, sampling_strategy=0.5)
     train_texts_arr = np.array(train_texts).reshape(-1, 1)
-    train_texts_resampled, train_labels_resampled = ros.fit_resample(train_texts_arr, train_labels)
+    train_labels_arr = np.array(train_labels)
+    train_texts_resampled, train_labels_resampled = ros.fit_resample(train_texts_arr, train_labels_arr)
     train_texts = train_texts_resampled.flatten().tolist()
     train_labels = train_labels_resampled.tolist()
 
