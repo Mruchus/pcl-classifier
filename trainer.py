@@ -1,26 +1,39 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import pandas as pd
+import os
+import random
 import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, get_linear_schedule_with_warmup
 from torch.optim import AdamW
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, classification_report
 from tqdm import tqdm
-from imblearn.over_sampling import RandomOverSampler
+import csv
 
-# configuration
+# Config
+SEED = 42
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_NAME = "microsoft/deberta-v3-base"
-MAX_LENGTH = 128
+MAX_LENGTH = 192
 BATCH_SIZE = 16
-LEARNING_RATE = 2e-5
-EPOCHS = 10  # Increased from 4
-PATIENCE = 3  # Stop if no improvement for 3 epochs
+LR = 2e-5
+EPOCHS = 6
+PATIENCE = 3
+WARMUP_RATIO = 0.1
+SAVE_DIR = "best_deberta_pcl"
 
-# data preparation
+# Reproducibility
+def set_seed(seed=SEED):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+set_seed(SEED)
+
+# Dataset
 class PCLDataset(Dataset):
     def __init__(self, texts, labels, tokenizer, max_len):
         self.texts = texts
@@ -33,31 +46,31 @@ class PCLDataset(Dataset):
 
     def __getitem__(self, idx):
         text = str(self.texts[idx])
-        encoding = self.tokenizer(
-            text, 
-            truncation=True, 
-            padding='max_length', 
-            max_length=self.max_len, 
-            return_tensors='pt'
+        enc = self.tokenizer(
+            text,
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_len,
+            return_tensors="pt",
         )
         return {
-            'input_ids': encoding['input_ids'].flatten(),
-            'attention_mask': encoding['attention_mask'].flatten(),
-            'labels': torch.tensor(self.labels[idx], dtype=torch.long)
+            "input_ids": enc["input_ids"].squeeze(0),         # [L]
+            "attention_mask": enc["attention_mask"].squeeze(0),# [L]
+            "labels": torch.tensor(int(self.labels[idx]), dtype=torch.long),
         }
 
-def load_and_split_data(file_path, test_size=0.2, seed=42):
-    # load tsv (quoting=3 ignores quotes in text)
+
+# Data loading
+def load_data(file_path):
     df = pd.read_csv(
         file_path,
         sep="\t",
         header=None,
         names=["id", "para_id", "keyword", "country", "text", "label"],
         engine="python",
-        quoting=3
+        quoting=csv.QUOTE_NONE,
     )
 
-    # clean
     df = df.dropna(subset=["text", "label"]).copy()
     df["text"] = df["text"].astype(str)
 
@@ -70,140 +83,136 @@ def load_and_split_data(file_path, test_size=0.2, seed=42):
 
     texts = df["text"].tolist()
     labels = df["label_bin"].tolist()
+    return texts, labels
 
-    # split
+def make_splits(texts, labels, test_size=0.2):
     train_texts, val_texts, train_labels, val_labels = train_test_split(
         texts,
         labels,
         test_size=test_size,
-        random_state=seed,
-        stratify=labels
+        random_state=SEED,
+        stratify=labels,
     )
+    return train_texts, val_texts, train_labels, val_labels
 
-    print(f"Before oversampling - Class distribution:")
-    unique, counts = np.unique(train_labels, return_counts=True)
-    for u, c in zip(unique, counts):
-        print(f"  Class {u}: {c} samples ({c/len(train_labels)*100:.1f}%)")
-
-    # oversample minority class to 50% ratio
-    ros = RandomOverSampler(random_state=seed, sampling_strategy=0.5)
-    train_texts_arr = np.array(train_texts).reshape(-1, 1)
-    train_labels_arr = np.array(train_labels)
-    train_texts_resampled, train_labels_resampled = ros.fit_resample(train_texts_arr, train_labels_arr)
-    train_texts = train_texts_resampled.flatten().tolist()
-    train_labels = train_labels_resampled.tolist()
-
-    print(f"\nAfter oversampling - Class distribution:")
-    unique, counts = np.unique(train_labels, return_counts=True)
-    for u, c in zip(unique, counts):
-        print(f"  Class {u}: {c} samples ({c/len(train_labels)*100:.1f}%)")
-
-    # calculate class weights (gentler since we oversampled)
-    counts = np.bincount(np.array(train_labels, dtype=np.int64), minlength=2)
+def compute_class_weights(train_labels):
+    # weights[c] = max_count / count[c]
+    counts = np.bincount(np.asarray(train_labels, dtype=np.int64), minlength=2)
     weights = counts.max() / np.maximum(counts, 1)
-    class_weights = torch.tensor(weights, dtype=torch.float32)
-    
-    print(f"\nClass weights: {class_weights}")
+    return torch.tensor(weights, dtype=torch.float32)
 
-    return train_texts, val_texts, train_labels, val_labels, class_weights
+# Train / eval
+def train_one_epoch(model, loader, optimizer, scheduler, class_weights):
+    model.train()
+    total_loss = 0.0
 
+    for batch in tqdm(loader, desc="Training", leave=False):
+        optimizer.zero_grad()
 
-# main training execution
+        input_ids = batch["input_ids"].to(DEVICE)
+        attention_mask = batch["attention_mask"].to(DEVICE)
+        targets = batch["labels"].to(DEVICE)
+
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        logits = outputs.logits.float()  # force fp32 loss
+
+        loss = F.cross_entropy(logits, targets, weight=class_weights)
+
+        if not torch.isfinite(loss):
+            print("Non-finite loss detected!")
+            print("targets unique:", torch.unique(targets))
+            print("logits min/max:", torch.nanmin(outputs.logits).item(), torch.nanmax(outputs.logits).item())
+            raise RuntimeError("Stopping due to NaN/Inf loss")
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        optimizer.step()
+        scheduler.step()
+
+        total_loss += loss.item()
+
+    return total_loss / max(len(loader), 1)
+
+@torch.no_grad()
+def evaluate(model, loader):
+    model.eval()
+    all_true = []
+    all_pred = []
+
+    for batch in tqdm(loader, desc="Validating", leave=False):
+        input_ids = batch["input_ids"].to(DEVICE)
+        attention_mask = batch["attention_mask"].to(DEVICE)
+        targets = batch["labels"].to(DEVICE)
+
+        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+        preds = torch.argmax(logits, dim=1)
+
+        all_true.extend(targets.cpu().numpy().tolist())
+        all_pred.extend(preds.cpu().numpy().tolist())
+
+    f1 = f1_score(all_true, all_pred, pos_label=1)
+    report = classification_report(all_true, all_pred, target_names=["Non-PCL", "PCL"], zero_division=0)
+    return f1, report
+
 def main():
-    print(f"Using device: {DEVICE}")
-    
-    # load data
-    train_texts, val_texts, train_labels, val_labels, class_weights = load_and_split_data("dontpatronizeme_pcl.tsv")
-    
+    print("Device:", DEVICE)
+
+    texts, labels = load_data("dontpatronizeme_pcl.tsv")
+    train_texts, val_texts, train_labels, val_labels = make_splits(texts, labels)
+
+    # show class balance
+    tr_counts = np.bincount(np.asarray(train_labels, dtype=np.int64), minlength=2)
+    va_counts = np.bincount(np.asarray(val_labels, dtype=np.int64), minlength=2)
+    print("Train counts:", tr_counts, " (pos% =", tr_counts[1] / tr_counts.sum() * 100, ")")
+    print("Val counts:  ", va_counts, " (pos% =", va_counts[1] / va_counts.sum() * 100, ")")
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2).to(DEVICE)
-    
+
     train_ds = PCLDataset(train_texts, train_labels, tokenizer, MAX_LENGTH)
     val_ds = PCLDataset(val_texts, val_labels, tokenizer, MAX_LENGTH)
-    
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
-    
-    # setup optimiser & scheduler
-    optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+
+    class_weights = compute_class_weights(train_labels).to(DEVICE).float()
+    print("Class weights:", class_weights.detach().cpu().numpy())
+
+    optimizer = AdamW(model.parameters(), lr=LR)
     total_steps = len(train_loader) * EPOCHS
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
-    
-    # use crossentropy instead of focal loss
-    # ensure weights match model dtype and are on correct device
-    model_dtype = next(model.parameters()).dtype
-    class_weights = class_weights.to(DEVICE).to(model_dtype)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    warmup_steps = int(WARMUP_RATIO * total_steps)
+    scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
-    # training loop with early stopping
-    best_f1 = 0
-    patience_counter = 0
-    
-    for epoch in range(EPOCHS):
-        model.train()
-        total_loss = 0
-        print(f"\n{'='*60}")
-        print(f"Epoch {epoch+1}/{EPOCHS}")
-        print(f"{'='*60}")
-        
-        for batch in tqdm(train_loader, desc="Training"):
-            optimizer.zero_grad()
-            ids = batch['input_ids'].to(DEVICE)
-            mask = batch['attention_mask'].to(DEVICE)
-            targets = batch['labels'].to(DEVICE)
-            
-            outputs = model(ids, attention_mask=mask)
-            loss = criterion(outputs.logits, targets)
-            
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            total_loss += loss.item()
+    best_f1 = -1.0
+    patience = 0
 
-        avg_loss = total_loss / len(train_loader)
-        print(f"Average training loss: {avg_loss:.4f}")
+    for epoch in range(1, EPOCHS + 1):
+        print("\n" + "=" * 60)
+        print(f"Epoch {epoch}/{EPOCHS}")
+        print("=" * 60)
 
-        # validation
-        model.eval()
-        all_preds, all_true = [], []
-        with torch.no_grad():
-            for batch in tqdm(val_loader, desc="Validating"):
-                ids = batch['input_ids'].to(DEVICE)
-                mask = batch['attention_mask'].to(DEVICE)
-                targets = batch['labels'].to(DEVICE)
-                
-                outputs = model(ids, attention_mask=mask)
-                preds = torch.argmax(outputs.logits, dim=1).cpu().numpy()
-                all_preds.extend(preds)
-                all_true.extend(targets.cpu().numpy())
-        
-        f1 = f1_score(all_true, all_preds, pos_label=1)
-        print(f"\nValidation F1 (PCL Class): {f1:.4f}")
-        print(classification_report(all_true, all_preds, target_names=['Non-PCL', 'PCL']))
-        
-        # check for model collapse
-        if f1 == 0:
-            print("⚠️  WARNING: Model collapsed (F1=0)! Stopping training.")
-            break
-        
-        # save best model and early stopping
-        if f1 > best_f1:
-            best_f1 = f1
-            patience_counter = 0
-            model.save_pretrained("BestModel_DeBERTa_Focal")
-            tokenizer.save_pretrained("BestModel_DeBERTa_Focal")
-            print(f"✓ New best F1: {f1:.4f} - Model saved!")
+        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, class_weights)
+        val_f1, val_report = evaluate(model, val_loader)
+
+        print(f"Train loss: {train_loss:.4f}")
+        print(f"Val F1 (PCL=1): {val_f1:.4f}")
+        print(val_report)
+
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            patience = 0
+            os.makedirs(SAVE_DIR, exist_ok=True)
+            model.save_pretrained(SAVE_DIR)
+            tokenizer.save_pretrained(SAVE_DIR)
+            print(f"Saved new best model to {SAVE_DIR} (F1={best_f1:.4f})")
         else:
-            patience_counter += 1
-            print(f"No improvement. Patience: {patience_counter}/{PATIENCE}")
-            if patience_counter >= PATIENCE:
-                print(f"\nEarly stopping triggered after {epoch+1} epochs")
-                print(f"Best F1 score: {best_f1:.4f}")
+            patience += 1
+            print(f"No improvement. Patience {patience}/{PATIENCE}")
+            if patience >= PATIENCE:
+                print("Early stopping.")
                 break
 
-    print(f"\n{'='*60}")
-    print(f"Training complete! Best F1: {best_f1:.4f}")
-    print(f"{'='*60}")
+    print("\nDone. Best val F1:", best_f1)
 
 if __name__ == "__main__":
     main()
