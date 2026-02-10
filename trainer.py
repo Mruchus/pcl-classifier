@@ -4,7 +4,8 @@ import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AdamW, get_linear_schedule_with_warmup
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, get_linear_schedule_with_warmup
+from torch.optim import AdamW
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, classification_report
 from tqdm import tqdm
