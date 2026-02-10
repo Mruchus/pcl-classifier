@@ -121,7 +121,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, class_weights):
         if not torch.isfinite(loss):
             print("Non-finite loss detected!")
             print("targets unique:", torch.unique(targets))
-            print("logits min/max:", torch.nanmin(outputs.logits).item(), torch.nanmax(outputs.logits).item())
+            print("logits min/max:", outputs.logits.min().item(), outputs.logits.max().item())
             raise RuntimeError("Stopping due to NaN/Inf loss")
 
         loss.backward()
@@ -178,7 +178,7 @@ def main():
     class_weights = compute_class_weights(train_labels).to(DEVICE).float()
     print("Class weights:", class_weights.detach().cpu().numpy())
 
-    optimizer = AdamW(model.parameters(), lr=LR)
+    optimizer = AdamW(model.parameters(), lr=LR, eps=1e-6)
     total_steps = len(train_loader) * EPOCHS
     warmup_steps = int(WARMUP_RATIO * total_steps)
     scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
