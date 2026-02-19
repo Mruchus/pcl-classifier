@@ -40,7 +40,7 @@ def prepare_comprehensive_data(file_path):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.8, gamma=2.0):
+    def __init__(self, alpha=0.95, gamma=2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -100,7 +100,7 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=1e-5,
+        lr=2e-5,
         weight_decay=0.01,
         eps=1e-6
     )
