@@ -3,7 +3,6 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import WeightedRandomSampler
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, precision_score, recall_score
 from datasets import Dataset, DatasetDict
 from transformers import (
@@ -16,12 +15,12 @@ from transformers import (
     get_linear_schedule_with_warmup
 )
 
-def prepare_comprehensive_data(file_path):
+def prepare_comprehensive_data(pcl_file, train_labels_file, dev_labels_file):
     cols = ['id', 'public_id', 'keyword', 'country', 'text', 'label',
             'unbalanced_power_relations', 'authority_voice', 'shallow_solutions',
             'presupposition', 'compassion', 'metaphor', 'the_people_the_merrier']
     df = pd.read_csv(
-        file_path, sep='\t', skipinitialspace=True,
+        pcl_file, sep='\t', skipinitialspace=True,
         names=cols, index_col='id', quoting=3
     )
     df = df.dropna(subset=['text', 'label'])
@@ -33,7 +32,6 @@ def prepare_comprehensive_data(file_path):
     df = df[df['text'].str.strip() != '']
     df = df[df['text'].str.len() > 10]
 
-    # Fill missing category values with 0 and convert to int
     category_cols = [
         'unbalanced_power_relations', 'authority_voice', 'shallow_solutions',
         'presupposition', 'compassion', 'metaphor', 'the_people_the_merrier'
@@ -42,10 +40,23 @@ def prepare_comprehensive_data(file_path):
         if col in df.columns:
             df[col] = df[col].fillna(0).astype(int)
 
-    train_df, dev_df = train_test_split(
-        df, test_size=0.2, random_state=42, stratify=df['label']
-    )
+    train_ids = pd.read_csv(train_labels_file)['par_id'].tolist()
+    dev_ids = pd.read_csv(dev_labels_file)['par_id'].tolist()
+
+    train_df = df[df.index.isin(train_ids)]
+    dev_df = df[df.index.isin(dev_ids)]
     return train_df, dev_df
+
+def prepare_test_data(test_file):
+    test_df = pd.read_csv(test_file, sep='\t', header=None,
+                          names=['t_id', 'user_id', 'keyword', 'country', 'text'])
+    test_df['text'] = (
+        test_df['keyword'].fillna('') + " [SEP] " +
+        test_df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
+    )
+    test_df = test_df[test_df['text'].str.strip() != '']
+    test_df = test_df[test_df['text'].str.len() > 10]
+    return test_df
 
 categories = [
     "unbalanced_power_relations",
@@ -102,7 +113,11 @@ class PCLComprehensiveTrainer(Trainer):
         )
 
 if __name__ == "__main__":
-    train_df, dev_df = prepare_comprehensive_data("dontpatronizeme_pcl.tsv")
+    train_df, dev_df = prepare_comprehensive_data(
+        "dontpatronizeme_pcl.tsv",
+        "SemEval 2022 Train Labels.csv",
+        "Semeval 2022 Dev Labels.csv"
+    )
 
     raw_datasets = DatasetDict({
         "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
@@ -121,7 +136,6 @@ if __name__ == "__main__":
 
     tokenized_datasets = raw_datasets.map(tokenize, batched=True)
 
-    # Keep only the columns we need (tokenizer outputs, labels, and categories)
     keep_columns = ['input_ids', 'attention_mask', 'labels'] + categories
     if 'token_type_ids' in tokenized_datasets["train"].column_names:
         keep_columns.append('token_type_ids')
@@ -129,7 +143,6 @@ if __name__ == "__main__":
         tokenized_datasets[split] = tokenized_datasets[split].select_columns(keep_columns)
 
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
-    model = model.float()
 
     labels_train = tokenized_datasets["train"]["labels"]
     class_counts = torch.bincount(torch.tensor(labels_train))
@@ -214,3 +227,18 @@ if __name__ == "__main__":
         r = recall_score(y_true, y_pred, zero_division=0)
         f = f1_score(y_true, y_pred, zero_division=0)
         print(f"{cat:<25} {p*100:5.1f} {r*100:5.1f} {f*100:5.1f}")
+
+    # --- Test set prediction ---
+    test_df = prepare_test_data("Task 4 Test.tsv")
+    test_dataset = Dataset.from_pandas(test_df[['text']])
+    def tokenize_test(batch):
+        return tokenizer(batch["text"], truncation=True, max_length=256)
+    test_tokenized = test_dataset.map(tokenize_test, batched=True)
+
+    test_predictions = trainer.predict(test_tokenized)
+    test_probs = torch.nn.functional.softmax(torch.tensor(test_predictions.predictions), dim=-1)[:, 1].numpy()
+    test_preds = (test_probs > best_t).astype(int)
+
+    with open("test.txt", "w") as f:
+        for p in test_preds:
+            f.write(f"{p}\n")
