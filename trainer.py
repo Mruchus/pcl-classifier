@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score
+from sklearn.utils import resample
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer, 
@@ -16,27 +17,36 @@ from transformers import (
 def prepare_data(file_path):
     print("--- Loading and Cleaning Data ---")
     cols = ['id', 'public_id', 'keyword', 'country', 'text', 'label']
-    # quoting=3 ensures we don't break on quotes inside paragraphs
     df = pd.read_csv(file_path, sep='\t', skipinitialspace=True, 
                      names=cols, index_col='id', quoting=3)
     
-    # drop empty rows
     df = df.dropna(subset=['text', 'label'])
-    
-    # label mapping: 0,1 -> 0 (No PCL) | 2,3,4 -> 1 (PCL)
     df['label'] = df['label'].apply(lambda x: 1 if x >= 2 else 0)
-    
-    # clean text: remove the @@ID tags and strip whitespace
     df['text'] = df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     
-    # split into 80% train, 20% dev (stratified to keep class balance)
     train_df, dev_df = train_test_split(
         df[['text', 'label']], 
         test_size=0.2, 
         random_state=42, 
         stratify=df['label']
     )
-    return train_df, dev_df
+
+    # separate majority and minority classes
+    df_majority = train_df[train_df.label == 0]
+    df_minority = train_df[train_df.label == 1]
+    
+    # upsample minority class to match majority class size
+    df_minority_upsampled = resample(df_minority, 
+                                     replace=True,
+                                     n_samples=len(df_majority),
+                                     random_state=42)
+    
+    train_df_balanced = pd.concat([df_majority, df_minority_upsampled])
+    
+    print(f"Original train size: {len(train_df)}")
+    print(f"Balanced train size: {len(train_df_balanced)}")
+    
+    return train_df_balanced, dev_df
 
 # load the raw data
 train_df, dev_df = prepare_data("dontpatronizeme_pcl.tsv")
@@ -85,24 +95,20 @@ def compute_metrics(eval_pred):
     return {"f1": f1_score(labels, preds, pos_label=1)}
 
 # training arguments
+
 training_args = TrainingArguments(
     output_dir="./pcl_model",
-    num_train_epochs=4,
+    num_train_epochs=4,           
     per_device_train_batch_size=8,
     eval_strategy="epoch",
     save_strategy="epoch",
-    learning_rate=1e-5,
-    weight_decay=0.01,
+    learning_rate=2e-5,
+    weight_decay=0.05,
     load_best_model_at_end=True,
     metric_for_best_model="f1",
-    logging_steps=10,
-
-
+    warmup_ratio=0.2,
+    lr_scheduler_type="cosine",
     bf16=True,
-    fp16=False,
-    max_grad_norm=1.0,
-    warmup_ratio=0.1,
-    adam_epsilon=1e-6,
 )
 
 trainer = PCLTrainer(
