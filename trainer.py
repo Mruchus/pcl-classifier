@@ -68,7 +68,7 @@ weights = weights.to(device)
 class PCLTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.get("labels")
-        outputs = model(**inputs)
+        outputs = model(**inputs)3
         logits = outputs.get("logits")
         
         loss_fct = nn.CrossEntropyLoss(weight=weights.to(device=logits.device, dtype=logits.dtype))
@@ -88,14 +88,21 @@ def compute_metrics(eval_pred):
 training_args = TrainingArguments(
     output_dir="./pcl_model",
     num_train_epochs=4,
-    per_device_train_batch_size=16,
+    per_device_train_batch_size=8,
     eval_strategy="epoch",
     save_strategy="epoch",
-    learning_rate=2e-5,
+    learning_rate=1e-5,
     weight_decay=0.01,
     load_best_model_at_end=True,
     metric_for_best_model="f1",
-    logging_steps=50,
+    logging_steps=10,
+
+
+    bf16=True,
+    fp16=False,
+    max_grad_norm=1.0,
+    warmup_ratio=0.1,
+    adam_epsilon=1e-6,
 )
 
 trainer = PCLTrainer(
