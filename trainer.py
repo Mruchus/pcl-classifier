@@ -27,40 +27,25 @@ def prepare_comprehensive_data(file_path):
         df['keyword'].fillna('') + " [SEP] " +
         df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     )
-
     df = df[df['text'].str.strip() != '']
-
     df = df[df['text'].str.len() > 10]
 
     train_df, dev_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df['label']
     )
-
     df_minority = train_df[train_df.label == 1]
     train_df_balanced = pd.concat([train_df, df_minority, df_minority])
-
-
-    assert train_df_balanced['text'].str.strip().ne('').all()
-    assert dev_df['text'].str.strip().ne('').all()
-
     return train_df_balanced, dev_df
 
 
-
 class FocalLoss(nn.Module):
-    """
-    Focal Loss for binary classification.
-    Uses softmax internally and clamps probabilities to avoid log(0) / exp(inf).
-    """
     def __init__(self, alpha=0.8, gamma=2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
 
     def forward(self, logits, labels):
-        # logits: (batch, 2), labels: (batch,) with values 0 or 1
         ce_loss = nn.functional.cross_entropy(logits, labels, reduction='none')
-        # Probability of the correct class (clamped for stability)
         pt = torch.exp(-ce_loss)
         pt = torch.clamp(pt, min=1e-7, max=1.0 - 1e-7)
         focal_weight = self.alpha * (1 - pt) ** self.gamma
@@ -68,7 +53,7 @@ class FocalLoss(nn.Module):
 
 
 class PCLComprehensiveTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
@@ -88,7 +73,7 @@ class CheckNaNGradCallback(TrainerCallback):
 
 
 if __name__ == "__main__":
-    # Load and prepare data
+    # Load data
     train_df, dev_df = prepare_comprehensive_data("dontpatronizeme_pcl.tsv")
 
     raw_datasets = DatasetDict({
@@ -105,7 +90,6 @@ if __name__ == "__main__":
         return tokenized
 
     original_columns = raw_datasets["train"].column_names
-
     tokenized_datasets = raw_datasets.map(
         tokenize,
         batched=True,
@@ -121,13 +105,13 @@ if __name__ == "__main__":
         load_best_model_at_end=True,
         metric_for_best_model="f1",
         warmup_steps=200,
-        learning_rate=2e-5,             
+        learning_rate=2e-5,
         weight_decay=0.01,
         logging_steps=50,
         max_grad_norm=1.0,
-        fp16=False,   
+        fp16=False,
         bf16=False,
-        remove_unused_columns=False,      
+        remove_unused_columns=False,  # we already handled removal
     )
 
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
@@ -137,7 +121,7 @@ if __name__ == "__main__":
         args=training_args,
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
-        processing_class=tokenizer,
+        tokenizer=tokenizer,
         data_collator=DataCollatorWithPadding(tokenizer),
         callbacks=[CheckNaNGradCallback()],
         compute_metrics=lambda p: {
