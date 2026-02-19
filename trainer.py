@@ -68,7 +68,7 @@ weights = weights.to(device)
 class PCLTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.get("labels")
-        outputs = model(**inputs)3
+        outputs = model(**inputs)
         logits = outputs.get("logits")
         
         loss_fct = nn.CrossEntropyLoss(weight=weights.to(device=logits.device, dtype=logits.dtype))
