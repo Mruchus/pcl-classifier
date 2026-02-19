@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import torch
 from torch import nn
+from torch.utils.data import WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score
 from datasets import Dataset, DatasetDict
@@ -28,19 +29,19 @@ def prepare_comprehensive_data(file_path):
         df['keyword'].fillna('') + " [SEP] " +
         df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     )
+
     df = df[df['text'].str.strip() != '']
     df = df[df['text'].str.len() > 10]
 
     train_df, dev_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df['label']
     )
-    df_minority = train_df[train_df.label == 1]
-    train_df_balanced = pd.concat([train_df, df_minority, df_minority])
-    return train_df_balanced, dev_df
+
+    return train_df, dev_df
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.95, gamma=2.0):
+    def __init__(self, alpha=0.90, gamma=2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -49,7 +50,9 @@ class FocalLoss(nn.Module):
         ce_loss = nn.functional.cross_entropy(logits, labels, reduction='none')
         pt = torch.exp(-ce_loss)
         pt = torch.clamp(pt, min=1e-7, max=1.0 - 1e-7)
-        focal_weight = self.alpha * (1 - pt) ** self.gamma
+
+        alpha_t = torch.where(labels == 1, self.alpha, 1 - self.alpha)
+        focal_weight = alpha_t * (1 - pt) ** self.gamma
         return (focal_weight * ce_loss).mean()
 
 
@@ -58,9 +61,36 @@ class PCLComprehensiveTrainer(Trainer):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
-        loss_fct = FocalLoss(alpha=0.8, gamma=2.0)
+        loss_fct = FocalLoss(alpha=0.90, gamma=2.0)
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
+
+
+    def get_train_dataloader(self):
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+
+
+        labels = train_dataset["labels"]
+        class_counts = torch.bincount(torch.tensor(labels))
+        class_weights = 1.0 / class_counts.float()
+        sample_weights = class_weights[labels]
+
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+
+        return torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            sampler=sampler,
+            collate_fn=data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
 
 
 class CheckNaNGradCallback(TrainerCallback):
@@ -74,6 +104,7 @@ class CheckNaNGradCallback(TrainerCallback):
 
 
 if __name__ == "__main__":
+
     train_df, dev_df = prepare_comprehensive_data("dontpatronizeme_pcl.tsv")
 
     raw_datasets = DatasetDict({
@@ -104,7 +135,6 @@ if __name__ == "__main__":
         weight_decay=0.01,
         eps=1e-6
     )
-
 
     batch_size = 16
     num_epochs = 5
@@ -140,14 +170,14 @@ if __name__ == "__main__":
         eval_dataset=tokenized_datasets["validation"],
         processing_class=tokenizer,
         data_collator=DataCollatorWithPadding(tokenizer),
-        optimizers=(optimizer, scheduler),   # use our custom optimizer and scheduler
+        optimizers=(optimizer, scheduler),
         callbacks=[CheckNaNGradCallback()],
         compute_metrics=lambda p: {
             "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1))
         },
     )
 
-    print("\n--- Training Stable PCL Model (with extra stability) ---")
+    print("\n--- Training Stable PCL Model (with balanced batches via WeightedRandomSampler) ---")
     trainer.train()
 
     predictions = trainer.predict(tokenized_datasets["validation"])
