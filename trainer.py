@@ -33,6 +33,15 @@ def prepare_comprehensive_data(file_path):
     df = df[df['text'].str.strip() != '']
     df = df[df['text'].str.len() > 10]
 
+    # Fill missing category values with 0 and convert to int
+    category_cols = [
+        'unbalanced_power_relations', 'authority_voice', 'shallow_solutions',
+        'presupposition', 'compassion', 'metaphor', 'the_people_the_merrier'
+    ]
+    for col in category_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna(0).astype(int)
+
     train_df, dev_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df['label']
     )
@@ -114,7 +123,6 @@ if __name__ == "__main__":
 
     # Keep only the columns we need (tokenizer outputs, labels, and categories)
     keep_columns = ['input_ids', 'attention_mask', 'labels'] + categories
-    # Include token_type_ids if present
     if 'token_type_ids' in tokenized_datasets["train"].column_names:
         keep_columns.append('token_type_ids')
     for split in tokenized_datasets.keys():
@@ -125,7 +133,6 @@ if __name__ == "__main__":
     labels_train = tokenized_datasets["train"]["labels"]
     class_counts = torch.bincount(torch.tensor(labels_train))
     class_weights = 1.0 / class_counts.float()
-    # Keep on CPU; will move to device in compute_loss
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
