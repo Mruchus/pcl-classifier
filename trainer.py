@@ -70,7 +70,9 @@ class PCLTrainer(Trainer):
         labels = inputs.get("labels")
         outputs = model(**inputs)
         logits = outputs.get("logits")
-        loss_fct = nn.CrossEntropyLoss(weight=weights)
+        
+        loss_fct = nn.CrossEntropyLoss(weight=weights.to(device=logits.device, dtype=logits.dtype))
+        
         loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
         return (loss, outputs) if return_outputs else loss
 
