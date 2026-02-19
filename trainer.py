@@ -11,7 +11,6 @@ from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorWithPadding,
-    get_linear_schedule_with_warmup,
     TrainerCallback
 )
 
@@ -28,43 +27,51 @@ def prepare_comprehensive_data(file_path):
         df['keyword'].fillna('') + " [SEP] " +
         df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     )
-    # Remove empty texts
+
     df = df[df['text'].str.strip() != '']
+
+    df = df[df['text'].str.len() > 10]
 
     train_df, dev_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df['label']
     )
+
     df_minority = train_df[train_df.label == 1]
     train_df_balanced = pd.concat([train_df, df_minority, df_minority])
+
+
+    assert train_df_balanced['text'].str.strip().ne('').all()
+    assert dev_df['text'].str.strip().ne('').all()
+
     return train_df_balanced, dev_df
 
 
-train_df, dev_df = prepare_comprehensive_data("dontpatronizeme_pcl.tsv")
-
-raw_datasets = DatasetDict({
-    "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
-    "validation": Dataset.from_pandas(dev_df.reset_index(drop=True)),
-})
-
 
 class FocalLoss(nn.Module):
+    """
+    Focal Loss for binary classification.
+    Uses softmax internally and clamps probabilities to avoid log(0) / exp(inf).
+    """
     def __init__(self, alpha=0.8, gamma=2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
 
     def forward(self, logits, labels):
-        ce_loss = torch.nn.functional.cross_entropy(logits, labels, reduction='none')
-        pt = torch.exp(-ce_loss)                 # pt = probability of correct class
+        # logits: (batch, 2), labels: (batch,) with values 0 or 1
+        ce_loss = nn.functional.cross_entropy(logits, labels, reduction='none')
+        # Probability of the correct class (clamped for stability)
+        pt = torch.exp(-ce_loss)
+        pt = torch.clamp(pt, min=1e-7, max=1.0 - 1e-7)
         focal_weight = self.alpha * (1 - pt) ** self.gamma
         return (focal_weight * ce_loss).mean()
 
 
 class PCLComprehensiveTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        labels = inputs.get("labels")
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.pop("labels")
         outputs = model(**inputs)
-        logits = outputs.get("logits")
+        logits = outputs.logits
         loss_fct = FocalLoss(alpha=0.8, gamma=2.0)
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
@@ -80,91 +87,72 @@ class CheckNaNGradCallback(TrainerCallback):
         return control
 
 
-MODEL_NAME = "microsoft/deberta-v3-base"
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+if __name__ == "__main__":
+    # Load and prepare data
+    train_df, dev_df = prepare_comprehensive_data("dontpatronizeme_pcl.tsv")
 
+    raw_datasets = DatasetDict({
+        "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
+        "validation": Dataset.from_pandas(dev_df.reset_index(drop=True)),
+    })
 
-def get_optimizer(model):
-    params = [
-        {
-            'params': [p for n, p in model.named_parameters() if "classifier" in n],
-            'lr': 2e-5,
+    MODEL_NAME = "microsoft/deberta-v3-base"
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    # DeBERTa uses [CLS] and [SEP] – we'll use padding and truncation
+    def tokenize(batch):
+        return tokenizer(batch["text"], truncation=True, max_length=256)
+
+    tokenized_datasets = raw_datasets.map(tokenize, batched=True)
+
+    training_args = TrainingArguments(
+        output_dir="./pcl_final",
+        num_train_epochs=5,
+        per_device_train_batch_size=16,
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="f1",
+        warmup_steps=200,
+        learning_rate=2e-5,             
+        weight_decay=0.01,
+        logging_steps=50,
+        max_grad_norm=1.0,
+        fp16=False,   
+        bf16=False,
+        remove_unused_columns=False,      
+    )
+
+    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+
+    trainer = PCLComprehensiveTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_datasets["train"],
+        eval_dataset=tokenized_datasets["validation"],
+        tokenizer=tokenizer,
+        data_collator=DataCollatorWithPadding(tokenizer),
+        callbacks=[CheckNaNGradCallback()],
+        compute_metrics=lambda p: {
+            "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1))
         },
-        {
-            'params': [p for n, p in model.named_parameters() if "deberta" in n],
-            'lr': 5e-6,
-        },
-    ]
-    return torch.optim.AdamW(params, weight_decay=0.01)
+    )
 
+    print("\n--- Training Stable PCL Model ---")
+    trainer.train()
 
-def tokenize(batch):
-    return tokenizer(batch["text"], truncation=True, max_length=256)
+    predictions = trainer.predict(tokenized_datasets["validation"])
+    probs = torch.nn.functional.softmax(torch.tensor(predictions.predictions), dim=-1)[:, 1].numpy()
+    true_labels = predictions.label_ids
 
+    best_t, best_f1 = 0.5, 0
+    for t in np.arange(0.2, 0.7, 0.01):
+        f1 = f1_score(true_labels, (probs > t).astype(int))
+        if f1 > best_f1:
+            best_f1, best_t = f1, t
 
-tokenized_datasets = raw_datasets.map(tokenize, batched=True)
+    print(f"Optimal Threshold: {best_t:.2f} | Max F1: {best_f1:.4f}")
+    final_preds = (probs > best_t).astype(int)
 
-training_args = TrainingArguments(
-    output_dir="./pcl_final",
-    num_train_epochs=5,
-    per_device_train_batch_size=16,
-    eval_strategy="epoch",
-    save_strategy="epoch",
-    load_best_model_at_end=True,
-    metric_for_best_model="f1",
-    warmup_steps=200,
-    logging_steps=50,
-    max_grad_norm=1.0,
-)
-
-optimizer = get_optimizer(model)
-
-num_training_steps = (
-    len(tokenized_datasets["train"])
-    // training_args.per_device_train_batch_size
-    * training_args.num_train_epochs
-)
-
-scheduler = get_linear_schedule_with_warmup(
-    optimizer,
-    num_warmup_steps=training_args.warmup_steps,
-    num_training_steps=num_training_steps,
-)
-
-trainer = PCLComprehensiveTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=tokenized_datasets["train"],
-    eval_dataset=tokenized_datasets["validation"],
-    processing_class=tokenizer,              
-    data_collator=DataCollatorWithPadding(tokenizer),
-    optimizers=(optimizer, scheduler),
-    callbacks=[CheckNaNGradCallback()],
-    compute_metrics=lambda p: {
-        "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1))
-    },
-)
-
-print("\n--- Training Comprehensive Model ---")
-trainer.train()
-
-predictions = trainer.predict(tokenized_datasets["validation"])
-probs = (
-    torch.nn.functional.softmax(torch.tensor(predictions.predictions), dim=-1)[:, 1]
-    .numpy()
-)
-true_labels = predictions.label_ids
-
-best_t, best_f1 = 0.5, 0
-for t in np.arange(0.2, 0.7, 0.01):
-    f1 = f1_score(true_labels, (probs > t).astype(int))
-    if f1 > best_f1:
-        best_f1, best_t = f1, t
-
-print(f"Optimal Threshold: {best_t:.2f} | Max F1: {best_f1:.4f}")
-final_preds = (probs > best_t).astype(int)
-
-with open("dev.txt", "w") as f:
-    for p in final_preds:
-        f.write(f"{p}\n")
+    with open("dev.txt", "w") as f:
+        for p in final_preds:
+            f.write(f"{p}\n")
