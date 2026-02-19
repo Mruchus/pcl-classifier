@@ -129,6 +129,7 @@ if __name__ == "__main__":
         tokenized_datasets[split] = tokenized_datasets[split].select_columns(keep_columns)
 
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+    model = model.float()
 
     labels_train = tokenized_datasets["train"]["labels"]
     class_counts = torch.bincount(torch.tensor(labels_train))
