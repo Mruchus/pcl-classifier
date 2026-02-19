@@ -29,19 +29,19 @@ def prepare_comprehensive_data(file_path):
         df['keyword'].fillna('') + " [SEP] " +
         df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     )
-
+    # Remove empty or too-short texts
     df = df[df['text'].str.strip() != '']
     df = df[df['text'].str.len() > 10]
 
     train_df, dev_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df['label']
     )
-
     return train_df, dev_df
 
 
+
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.90, gamma=2.0):
+    def __init__(self, alpha=0.95, gamma=3.0):          # increased gamma for harder focus
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -50,7 +50,7 @@ class FocalLoss(nn.Module):
         ce_loss = nn.functional.cross_entropy(logits, labels, reduction='none')
         pt = torch.exp(-ce_loss)
         pt = torch.clamp(pt, min=1e-7, max=1.0 - 1e-7)
-
+        # Class‑specific alpha: alpha for positive, 1-alpha for negative
         alpha_t = torch.where(labels == 1, self.alpha, 1 - self.alpha)
         focal_weight = alpha_t * (1 - pt) ** self.gamma
         return (focal_weight * ce_loss).mean()
@@ -61,15 +61,14 @@ class PCLComprehensiveTrainer(Trainer):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
-        loss_fct = FocalLoss(alpha=0.90, gamma=2.0)
+        loss_fct = FocalLoss(alpha=0.95, gamma=3.0)      # must match the hyperparameters above
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
-
     def get_train_dataloader(self):
+        """Override to use WeightedRandomSampler for balanced batches."""
         train_dataset = self.train_dataset
         data_collator = self.data_collator
-
 
         labels = train_dataset["labels"]
         class_counts = torch.bincount(torch.tensor(labels))
@@ -104,7 +103,6 @@ class CheckNaNGradCallback(TrainerCallback):
 
 
 if __name__ == "__main__":
-
     train_df, dev_df = prepare_comprehensive_data("dontpatronizeme_pcl.tsv")
 
     raw_datasets = DatasetDict({
@@ -131,7 +129,7 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=2e-5,
+        lr=5e-5,
         weight_decay=0.01,
         eps=1e-6
     )
@@ -177,7 +175,7 @@ if __name__ == "__main__":
         },
     )
 
-    print("\n--- Training Stable PCL Model (with balanced batches via WeightedRandomSampler) ---")
+    print("\n--- Training Stable PCL Model (balanced batches, focal loss γ=3, lr=5e-5) ---")
     trainer.train()
 
     predictions = trainer.predict(tokenized_datasets["validation"])
