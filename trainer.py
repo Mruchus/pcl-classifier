@@ -12,6 +12,7 @@ from transformers import (
     Trainer,
     DataCollatorWithPadding,
     get_linear_schedule_with_warmup,
+    TrainerCallback
 )
 
 
@@ -27,6 +28,9 @@ def prepare_comprehensive_data(file_path):
         df['keyword'].fillna('') + " [SEP] " +
         df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     )
+    # Remove empty texts
+    df = df[df['text'].str.strip() != '']
+
     train_df, dev_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df['label']
     )
@@ -44,23 +48,16 @@ raw_datasets = DatasetDict({
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.8, gamma=2.0, eps=1e-7):
+    def __init__(self, alpha=0.8, gamma=2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.eps = eps
 
     def forward(self, logits, labels):
-        logits = logits.float()
-        labels = labels.long()
-        
-        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-        log_pt = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
-        pt = torch.exp(log_pt).clamp(self.eps, 1.0 - self.eps)
-        
-        focal_weight = (self.alpha * (1.0 - pt) ** self.gamma).float()
-        loss = (-focal_weight * log_pt).float()                      
-        return loss.mean()
+        ce_loss = torch.nn.functional.cross_entropy(logits, labels, reduction='none')
+        pt = torch.exp(-ce_loss)                 # pt = probability of correct class
+        focal_weight = self.alpha * (1 - pt) ** self.gamma
+        return (focal_weight * ce_loss).mean()
 
 
 class PCLComprehensiveTrainer(Trainer):
@@ -72,35 +69,31 @@ class PCLComprehensiveTrainer(Trainer):
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
+
+class CheckNaNGradCallback(TrainerCallback):
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        for name, param in model.named_parameters():
+            if param.grad is not None and torch.isnan(param.grad).any():
+                print(f"NaN gradient detected in {name} at step {state.global_step}")
+                control.should_training_stop = True
+                return control
+        return control
+
+
 MODEL_NAME = "microsoft/deberta-v3-base"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
-for name, param in model.named_parameters():
-    if "deberta" in name:
-        param.requires_grad = False
-
-from transformers import TrainerCallback
-
-class UnfreezeCallback(TrainerCallback):
-    def __init__(self, unfreeze_after_steps=200):
-        self.unfreeze_after_steps = unfreeze_after_steps
-
-    def on_step_begin(self, args, state, control, model=None, **kwargs):
-        if state.global_step == self.unfreeze_after_steps:
-            for name, param in model.named_parameters():
-                param.requires_grad = True
-            print(f"\nUnfroze all parameters at step {state.global_step}")
 
 def get_optimizer(model):
     params = [
         {
             'params': [p for n, p in model.named_parameters() if "classifier" in n],
-            'lr': 1e-4,
+            'lr': 2e-5,
         },
         {
             'params': [p for n, p in model.named_parameters() if "deberta" in n],
-            'lr': 2e-5,
+            'lr': 5e-6,
         },
     ]
     return torch.optim.AdamW(params, weight_decay=0.01)
@@ -121,7 +114,8 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     metric_for_best_model="f1",
     warmup_steps=200,
-    bf16=True,
+    bf16=False,
+    fp16=True,
     logging_steps=50,
     max_grad_norm=1.0,
 )
@@ -145,9 +139,10 @@ trainer = PCLComprehensiveTrainer(
     args=training_args,
     train_dataset=tokenized_datasets["train"],
     eval_dataset=tokenized_datasets["validation"],
-    processing_class=tokenizer,
+    tokenizer=tokenizer,              
     data_collator=DataCollatorWithPadding(tokenizer),
     optimizers=(optimizer, scheduler),
+    callbacks=[CheckNaNGradCallback()],
     compute_metrics=lambda p: {
         "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1))
     },
