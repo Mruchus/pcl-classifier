@@ -98,11 +98,19 @@ if __name__ == "__main__":
 
     MODEL_NAME = "microsoft/deberta-v3-base"
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    # DeBERTa uses [CLS] and [SEP] – we'll use padding and truncation
-    def tokenize(batch):
-        return tokenizer(batch["text"], truncation=True, max_length=256)
 
-    tokenized_datasets = raw_datasets.map(tokenize, batched=True)
+    def tokenize(batch):
+        tokenized = tokenizer(batch["text"], truncation=True, max_length=256)
+        tokenized["labels"] = batch["label"]
+        return tokenized
+
+    original_columns = raw_datasets["train"].column_names
+
+    tokenized_datasets = raw_datasets.map(
+        tokenize,
+        batched=True,
+        remove_columns=original_columns
+    )
 
     training_args = TrainingArguments(
         output_dir="./pcl_final",
