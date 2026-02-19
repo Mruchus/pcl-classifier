@@ -60,7 +60,7 @@ def prepare_test_data(test_file):
 
 # Focal Loss (same as your best run)
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.95, gamma=3.0):
+    def __init__(self, alpha=0.5, gamma=3.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -87,7 +87,7 @@ class PCLComprehensiveTrainer(Trainer):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
-        loss_fct = FocalLoss(alpha=0.95, gamma=3.0)
+        loss_fct = FocalLoss(alpha=0.5, gamma=3.0)
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
