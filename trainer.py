@@ -101,7 +101,7 @@ trainer = PCLComprehensiveTrainer(
     args=training_args,
     train_dataset=tokenized_datasets["train"],
     eval_dataset=tokenized_datasets["validation"],
-    tokenizer=tokenizer,
+    processing_class=tokenizer,
     data_collator=DataCollatorWithPadding(tokenizer),
     optimizers=(get_optimizer(model), None), # Override default optimizer
     compute_metrics=lambda p: {"f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1))}
