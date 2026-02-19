@@ -114,8 +114,6 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     metric_for_best_model="f1",
     warmup_steps=200,
-    bf16=False,
-    fp16=True,
     logging_steps=50,
     max_grad_norm=1.0,
 )
