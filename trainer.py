@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import WeightedRandomSampler
-from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.metrics import f1_score
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer,
@@ -58,15 +58,20 @@ def prepare_test_data(test_file):
     test_df = test_df[test_df['text'].str.len() > 10]
     return test_df
 
-categories = [
-    "unbalanced_power_relations",
-    "authority_voice",
-    "shallow_solutions",
-    "presupposition",
-    "compassion",
-    "metaphor",
-    "the_people_the_merrier"
-]
+# Focal Loss (same as your best run)
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.95, gamma=3.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits, labels):
+        ce_loss = nn.functional.cross_entropy(logits, labels, reduction='none')
+        pt = torch.exp(-ce_loss)
+        pt = torch.clamp(pt, min=1e-7, max=1.0 - 1e-7)
+        alpha_t = torch.where(labels == 1, self.alpha, 1 - self.alpha)
+        focal_weight = alpha_t * (1 - pt) ** self.gamma
+        return (focal_weight * ce_loss).mean()
 
 class CheckNaNGradCallback(TrainerCallback):
     def on_step_end(self, args, state, control, model=None, **kwargs):
@@ -78,15 +83,11 @@ class CheckNaNGradCallback(TrainerCallback):
         return control
 
 class PCLComprehensiveTrainer(Trainer):
-    def __init__(self, class_weights, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.class_weights = class_weights
-
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
-        loss_fct = nn.CrossEntropyLoss(weight=self.class_weights.to(logits.device, dtype=logits.dtype))
+        loss_fct = FocalLoss(alpha=0.95, gamma=3.0)
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
@@ -95,8 +96,7 @@ class PCLComprehensiveTrainer(Trainer):
         data_collator = self.data_collator
         labels = train_dataset["labels"]
         class_counts = torch.bincount(torch.tensor(labels))
-        # Use inverse sqrt for milder weighting
-        class_weights = 1.0 / torch.sqrt(class_counts.float())
+        class_weights = 1.0 / class_counts.float()
         sample_weights = class_weights[labels]
         sampler = WeightedRandomSampler(
             weights=sample_weights,
@@ -131,23 +131,17 @@ if __name__ == "__main__":
     def tokenize(batch):
         tokenized = tokenizer(batch["text"], truncation=True, max_length=256)
         tokenized["labels"] = batch["label"]
-        for cat in categories:
-            tokenized[cat] = batch[cat]
         return tokenized
 
     tokenized_datasets = raw_datasets.map(tokenize, batched=True)
 
-    keep_columns = ['input_ids', 'attention_mask', 'labels'] + categories
+    keep_columns = ['input_ids', 'attention_mask', 'labels']
     if 'token_type_ids' in tokenized_datasets["train"].column_names:
         keep_columns.append('token_type_ids')
     for split in tokenized_datasets.keys():
         tokenized_datasets[split] = tokenized_datasets[split].select_columns(keep_columns)
 
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
-
-    labels_train = tokenized_datasets["train"]["labels"]
-    class_counts = torch.bincount(torch.tensor(labels_train))
-    class_weights = 1.0 / torch.sqrt(class_counts.float())   # milder weights
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -184,7 +178,6 @@ if __name__ == "__main__":
     )
 
     trainer = PCLComprehensiveTrainer(
-        class_weights=class_weights,
         model=model,
         args=training_args,
         train_dataset=tokenized_datasets["train"],
@@ -199,9 +192,10 @@ if __name__ == "__main__":
         },
     )
 
-    print("\n--- Training with Balanced Sampler + sqrt class weights ---")
+    print("\n--- Training with Focal Loss + Balanced Sampler (official split) ---")
     trainer.train()
 
+    # Dev set predictions + threshold tuning
     predictions = trainer.predict(tokenized_datasets["validation"])
     probs = torch.nn.functional.softmax(torch.tensor(predictions.predictions), dim=-1)[:, 1].numpy()
     true_labels = predictions.label_ids
@@ -219,17 +213,7 @@ if __name__ == "__main__":
         for p in final_preds:
             f.write(f"{p}\n")
 
-    print("\n--- Per-Category Results (Binary Model) ---")
-    print(f"{'Category':<25} {'P':>6} {'R':>6} {'F1':>6}")
-    for cat in categories:
-        y_true = tokenized_datasets["validation"][cat]
-        y_pred = final_preds
-        p = precision_score(y_true, y_pred, zero_division=0)
-        r = recall_score(y_true, y_pred, zero_division=0)
-        f = f1_score(y_true, y_pred, zero_division=0)
-        print(f"{cat:<25} {p*100:5.1f} {r*100:5.1f} {f*100:5.1f}")
-
-    # --- Test set prediction (fixed) ---
+    # Test set prediction
     test_df = prepare_test_data("Task 4 Test.tsv")
     test_dataset = Dataset.from_pandas(test_df[['text']])
     def tokenize_test(batch):
