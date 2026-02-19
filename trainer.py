@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.utils.data import WeightedRandomSampler
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer,
@@ -16,9 +16,10 @@ from transformers import (
     get_linear_schedule_with_warmup
 )
 
-
 def prepare_comprehensive_data(file_path):
-    cols = ['id', 'public_id', 'keyword', 'country', 'text', 'label']
+    cols = ['id', 'public_id', 'keyword', 'country', 'text', 'label',
+            'unbalanced_power_relations', 'authority_voice', 'shallow_solutions',
+            'presupposition', 'compassion', 'metaphor', 'the_people_the_merrier']
     df = pd.read_csv(
         file_path, sep='\t', skipinitialspace=True,
         names=cols, index_col='id', quoting=3
@@ -29,7 +30,6 @@ def prepare_comprehensive_data(file_path):
         df['keyword'].fillna('') + " [SEP] " +
         df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     )
-    # Remove empty or too-short texts
     df = df[df['text'].str.strip() != '']
     df = df[df['text'].str.len() > 10]
 
@@ -37,60 +37,6 @@ def prepare_comprehensive_data(file_path):
         df, test_size=0.2, random_state=42, stratify=df['label']
     )
     return train_df, dev_df
-
-
-
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.95, gamma=3.0):          # increased gamma for harder focus
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-
-    def forward(self, logits, labels):
-        ce_loss = nn.functional.cross_entropy(logits, labels, reduction='none')
-        pt = torch.exp(-ce_loss)
-        pt = torch.clamp(pt, min=1e-7, max=1.0 - 1e-7)
-        # Class‑specific alpha: alpha for positive, 1-alpha for negative
-        alpha_t = torch.where(labels == 1, self.alpha, 1 - self.alpha)
-        focal_weight = alpha_t * (1 - pt) ** self.gamma
-        return (focal_weight * ce_loss).mean()
-
-
-class PCLComprehensiveTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        labels = inputs.pop("labels")
-        outputs = model(**inputs)
-        logits = outputs.logits
-        loss_fct = FocalLoss(alpha=0.95, gamma=3.0)      # must match the hyperparameters above
-        loss = loss_fct(logits, labels)
-        return (loss, outputs) if return_outputs else loss
-
-    def get_train_dataloader(self):
-        """Override to use WeightedRandomSampler for balanced batches."""
-        train_dataset = self.train_dataset
-        data_collator = self.data_collator
-
-        labels = train_dataset["labels"]
-        class_counts = torch.bincount(torch.tensor(labels))
-        class_weights = 1.0 / class_counts.float()
-        sample_weights = class_weights[labels]
-
-        sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True
-        )
-
-        return torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=self.args.per_device_train_batch_size,
-            sampler=sampler,
-            collate_fn=data_collator,
-            drop_last=self.args.dataloader_drop_last,
-            num_workers=self.args.dataloader_num_workers,
-            pin_memory=self.args.dataloader_pin_memory,
-        )
-
 
 class CheckNaNGradCallback(TrainerCallback):
     def on_step_end(self, args, state, control, model=None, **kwargs):
@@ -101,6 +47,40 @@ class CheckNaNGradCallback(TrainerCallback):
                 return control
         return control
 
+class PCLComprehensiveTrainer(Trainer):
+    def __init__(self, class_weights, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+        loss_fct = nn.CrossEntropyLoss(weight=self.class_weights)
+        loss = loss_fct(logits, labels)
+        return (loss, outputs) if return_outputs else loss
+
+    def get_train_dataloader(self):
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+        labels = train_dataset["labels"]
+        class_counts = torch.bincount(torch.tensor(labels))
+        class_weights = 1.0 / class_counts.float()
+        sample_weights = class_weights[labels]
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+        return torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            sampler=sampler,
+            collate_fn=data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
 
 if __name__ == "__main__":
     train_df, dev_df = prepare_comprehensive_data("dontpatronizeme_pcl.tsv")
@@ -116,16 +96,23 @@ if __name__ == "__main__":
     def tokenize(batch):
         tokenized = tokenizer(batch["text"], truncation=True, max_length=256)
         tokenized["labels"] = batch["label"]
+        tokenized["unbalanced_power_relations"] = batch["unbalanced_power_relations"]
+        tokenized["authority_voice"] = batch["authority_voice"]
+        tokenized["shallow_solutions"] = batch["shallow_solutions"]
+        tokenized["presupposition"] = batch["presupposition"]
+        tokenized["compassion"] = batch["compassion"]
+        tokenized["metaphor"] = batch["metaphor"]
+        tokenized["the_people_the_merrier"] = batch["the_people_the_merrier"]
         return tokenized
 
-    original_columns = raw_datasets["train"].column_names
-    tokenized_datasets = raw_datasets.map(
-        tokenize,
-        batched=True,
-        remove_columns=original_columns
-    )
+    tokenized_datasets = raw_datasets.map(tokenize, batched=True)
 
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+
+    labels_train = tokenized_datasets["train"]["labels"]
+    class_counts = torch.bincount(torch.tensor(labels_train))
+    class_weights = 1.0 / class_counts.float()
+    class_weights = class_weights.to(model.device) if next(model.parameters()).is_cuda else class_weights
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -162,6 +149,7 @@ if __name__ == "__main__":
     )
 
     trainer = PCLComprehensiveTrainer(
+        class_weights=class_weights,
         model=model,
         args=training_args,
         train_dataset=tokenized_datasets["train"],
@@ -171,11 +159,12 @@ if __name__ == "__main__":
         optimizers=(optimizer, scheduler),
         callbacks=[CheckNaNGradCallback()],
         compute_metrics=lambda p: {
-            "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1))
+            "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1)),
+            "num_pos_pred": np.sum(np.argmax(p.predictions, axis=-1))
         },
     )
 
-    print("\n--- Training Stable PCL Model (balanced batches, focal loss γ=3, lr=5e-5) ---")
+    print("\n--- Training with Weighted Cross-Entropy and Balanced Batches ---")
     trainer.train()
 
     predictions = trainer.predict(tokenized_datasets["validation"])
@@ -194,3 +183,23 @@ if __name__ == "__main__":
     with open("dev.txt", "w") as f:
         for p in final_preds:
             f.write(f"{p}\n")
+
+    categories = [
+        "unbalanced_power_relations",
+        "authority_voice",
+        "shallow_solutions",
+        "presupposition",
+        "compassion",
+        "metaphor",
+        "the_people_the_merrier"
+    ]
+
+    print("\n--- Per-Category Results (Binary Model) ---")
+    print(f"{'Category':<25} {'P':>6} {'R':>6} {'F1':>6}")
+    for cat in categories:
+        y_true = tokenized_datasets["validation"][cat]
+        y_pred = final_preds
+        p = precision_score(y_true, y_pred, zero_division=0)
+        r = recall_score(y_true, y_pred, zero_division=0)
+        f = f1_score(y_true, y_pred, zero_division=0)
+        print(f"{cat:<25} {p*100:5.1f} {r*100:5.1f} {f*100:5.1f}")
