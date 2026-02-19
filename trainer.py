@@ -11,7 +11,8 @@ from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorWithPadding,
-    TrainerCallback
+    TrainerCallback,
+    get_linear_schedule_with_warmup
 )
 
 
@@ -73,7 +74,6 @@ class CheckNaNGradCallback(TrainerCallback):
 
 
 if __name__ == "__main__":
-    # Load data
     train_df, dev_df = prepare_comprehensive_data("dontpatronizeme_pcl.tsv")
 
     raw_datasets = DatasetDict({
@@ -96,25 +96,42 @@ if __name__ == "__main__":
         remove_columns=original_columns
     )
 
+    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=1e-5,
+        weight_decay=0.01,
+        eps=1e-6
+    )
+
+
+    batch_size = 16
+    num_epochs = 5
+    total_steps = len(tokenized_datasets["train"]) // batch_size * num_epochs
+    warmup_steps = 500
+
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
+
     training_args = TrainingArguments(
         output_dir="./pcl_final",
-        num_train_epochs=5,
-        per_device_train_batch_size=16,
+        num_train_epochs=num_epochs,
+        per_device_train_batch_size=batch_size,
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="f1",
-        warmup_steps=200,
-        learning_rate=2e-5,
-        weight_decay=0.01,
+        warmup_steps=warmup_steps,
         logging_steps=50,
         max_grad_norm=1.0,
         fp16=False,
         bf16=False,
-        remove_unused_columns=False,  # we already handled removal
+        remove_unused_columns=False,
     )
-
-    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
     trainer = PCLComprehensiveTrainer(
         model=model,
@@ -123,13 +140,14 @@ if __name__ == "__main__":
         eval_dataset=tokenized_datasets["validation"],
         processing_class=tokenizer,
         data_collator=DataCollatorWithPadding(tokenizer),
+        optimizers=(optimizer, scheduler),   # use our custom optimizer and scheduler
         callbacks=[CheckNaNGradCallback()],
         compute_metrics=lambda p: {
             "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1))
         },
     )
 
-    print("\n--- Training Stable PCL Model ---")
+    print("\n--- Training Stable PCL Model (with extra stability) ---")
     trainer.train()
 
     predictions = trainer.predict(tokenized_datasets["validation"])
