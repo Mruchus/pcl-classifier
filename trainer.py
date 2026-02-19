@@ -53,12 +53,13 @@ class FocalLoss(nn.Module):
     def forward(self, logits, labels):
         logits = logits.float()
         labels = labels.long()
-
+        
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
         log_pt = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
         pt = torch.exp(log_pt).clamp(self.eps, 1.0 - self.eps)
-        focal_weight = self.alpha * (1.0 - pt) ** self.gamma
-        loss = -focal_weight * log_pt
+        
+        focal_weight = (self.alpha * (1.0 - pt) ** self.gamma).float()
+        loss = (-focal_weight * log_pt).float()                      
         return loss.mean()
 
 
@@ -71,11 +72,25 @@ class PCLComprehensiveTrainer(Trainer):
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
-
 MODEL_NAME = "microsoft/deberta-v3-base"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
+for name, param in model.named_parameters():
+    if "deberta" in name:
+        param.requires_grad = False
+
+from transformers import TrainerCallback
+
+class UnfreezeCallback(TrainerCallback):
+    def __init__(self, unfreeze_after_steps=200):
+        self.unfreeze_after_steps = unfreeze_after_steps
+
+    def on_step_begin(self, args, state, control, model=None, **kwargs):
+        if state.global_step == self.unfreeze_after_steps:
+            for name, param in model.named_parameters():
+                param.requires_grad = True
+            print(f"\nUnfroze all parameters at step {state.global_step}")
 
 def get_optimizer(model):
     params = [
@@ -118,6 +133,7 @@ num_training_steps = (
     // training_args.per_device_train_batch_size
     * training_args.num_train_epochs
 )
+
 scheduler = get_linear_schedule_with_warmup(
     optimizer,
     num_warmup_steps=training_args.warmup_steps,
