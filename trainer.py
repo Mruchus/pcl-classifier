@@ -109,6 +109,7 @@ training_args = TrainingArguments(
     bf16=True,
     logging_steps=50,
     max_grad_norm=1.0,
+)
 
 optimizer = get_optimizer(model)
 
