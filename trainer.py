@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
 import torch
-from torch import nn
-from torch.utils.data import WeightedRandomSampler
 from sklearn.metrics import f1_score
 from datasets import Dataset, DatasetDict
 from transformers import (
@@ -16,9 +14,8 @@ from transformers import (
 )
 
 def prepare_comprehensive_data(pcl_file, train_labels_file, dev_labels_file):
-    cols = ['id', 'public_id', 'keyword', 'country', 'text', 'label',
-            'unbalanced_power_relations', 'authority_voice', 'shallow_solutions',
-            'presupposition', 'compassion', 'metaphor', 'the_people_the_merrier']
+    cols = ['id', 'public_id', 'keyword', 'country', 'text', 'label']
+    # Read only the columns we need – ignore category columns (not used)
     df = pd.read_csv(
         pcl_file, sep='\t', skipinitialspace=True,
         names=cols, index_col='id', quoting=3
@@ -32,19 +29,27 @@ def prepare_comprehensive_data(pcl_file, train_labels_file, dev_labels_file):
     df = df[df['text'].str.strip() != '']
     df = df[df['text'].str.len() > 10]
 
-    category_cols = [
-        'unbalanced_power_relations', 'authority_voice', 'shallow_solutions',
-        'presupposition', 'compassion', 'metaphor', 'the_people_the_merrier'
-    ]
-    for col in category_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna(0).astype(int)
-
+    # Load official train/dev IDs
     train_ids = pd.read_csv(train_labels_file)['par_id'].tolist()
     dev_ids = pd.read_csv(dev_labels_file)['par_id'].tolist()
 
     train_df = df[df.index.isin(train_ids)]
     dev_df = df[df.index.isin(dev_ids)]
+
+    # --- AGGRESSIVE OVERSAMPLING of positive examples ---
+    pos_train = train_df[train_df['label'] == 1]
+    neg_train = train_df[train_df['label'] == 0]
+    # Duplicate positives until roughly balanced with negatives
+    # For example, if we have 1000 negatives and 200 positives, ratio = 1000//200 = 5
+    ratio = len(neg_train) // len(pos_train) if len(pos_train) > 0 else 1
+    if ratio > 1:
+        # Repeat positives 'ratio' times (original + (ratio-1) duplicates)
+        pos_oversampled = pd.concat([pos_train] * ratio, ignore_index=True)
+        train_df = pd.concat([neg_train, pos_oversampled], ignore_index=True)
+    else:
+        # Already balanced or positive majority – keep as is
+        train_df = pd.concat([neg_train, pos_train], ignore_index=True)
+
     return train_df, dev_df
 
 def prepare_test_data(test_file):
@@ -58,21 +63,6 @@ def prepare_test_data(test_file):
     test_df = test_df[test_df['text'].str.len() > 10]
     return test_df
 
-# Focal Loss (same as your best run)
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.5, gamma=3.0):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-
-    def forward(self, logits, labels):
-        ce_loss = nn.functional.cross_entropy(logits, labels, reduction='none')
-        pt = torch.exp(-ce_loss)
-        pt = torch.clamp(pt, min=1e-7, max=1.0 - 1e-7)
-        alpha_t = torch.where(labels == 1, self.alpha, 1 - self.alpha)
-        focal_weight = alpha_t * (1 - pt) ** self.gamma
-        return (focal_weight * ce_loss).mean()
-
 class CheckNaNGradCallback(TrainerCallback):
     def on_step_end(self, args, state, control, model=None, **kwargs):
         for name, param in model.named_parameters():
@@ -81,37 +71,6 @@ class CheckNaNGradCallback(TrainerCallback):
                 control.should_training_stop = True
                 return control
         return control
-
-class PCLComprehensiveTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        labels = inputs.pop("labels")
-        outputs = model(**inputs)
-        logits = outputs.logits
-        loss_fct = FocalLoss(alpha=0.5, gamma=3.0)
-        loss = loss_fct(logits, labels)
-        return (loss, outputs) if return_outputs else loss
-
-    def get_train_dataloader(self):
-        train_dataset = self.train_dataset
-        data_collator = self.data_collator
-        labels = train_dataset["labels"]
-        class_counts = torch.bincount(torch.tensor(labels))
-        class_weights = 1.0 / class_counts.float()
-        sample_weights = class_weights[labels]
-        sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True
-        )
-        return torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=self.args.per_device_train_batch_size,
-            sampler=sampler,
-            collate_fn=data_collator,
-            drop_last=self.args.dataloader_drop_last,
-            num_workers=self.args.dataloader_num_workers,
-            pin_memory=self.args.dataloader_pin_memory,
-        )
 
 if __name__ == "__main__":
     train_df, dev_df = prepare_comprehensive_data(
@@ -135,6 +94,7 @@ if __name__ == "__main__":
 
     tokenized_datasets = raw_datasets.map(tokenize, batched=True)
 
+    # Keep only the columns needed for training
     keep_columns = ['input_ids', 'attention_mask', 'labels']
     if 'token_type_ids' in tokenized_datasets["train"].column_names:
         keep_columns.append('token_type_ids')
@@ -145,7 +105,7 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=1e-4,
+        lr=5e-5,
         weight_decay=0.01,
         eps=1e-6
     )
@@ -177,7 +137,7 @@ if __name__ == "__main__":
         remove_unused_columns=False,
     )
 
-    trainer = PCLComprehensiveTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_datasets["train"],
@@ -192,7 +152,7 @@ if __name__ == "__main__":
         },
     )
 
-    print("\n--- Training with Focal Loss + Balanced Sampler (official split) ---")
+    print("\n--- Training: Oversampled Positives + Standard Cross‑Entropy (5 epochs) ---")
     trainer.train()
 
     # Dev set predictions + threshold tuning
