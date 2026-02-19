@@ -86,7 +86,6 @@ class PCLComprehensiveTrainer(Trainer):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
-        # Ensure class_weights has the same dtype as logits
         loss_fct = nn.CrossEntropyLoss(weight=self.class_weights.to(logits.device, dtype=logits.dtype))
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
@@ -96,7 +95,8 @@ class PCLComprehensiveTrainer(Trainer):
         data_collator = self.data_collator
         labels = train_dataset["labels"]
         class_counts = torch.bincount(torch.tensor(labels))
-        class_weights = 1.0 / class_counts.float()
+        # Use inverse sqrt for milder weighting
+        class_weights = 1.0 / torch.sqrt(class_counts.float())
         sample_weights = class_weights[labels]
         sampler = WeightedRandomSampler(
             weights=sample_weights,
@@ -147,7 +147,7 @@ if __name__ == "__main__":
 
     labels_train = tokenized_datasets["train"]["labels"]
     class_counts = torch.bincount(torch.tensor(labels_train))
-    class_weights = 1.0 / class_counts.float()
+    class_weights = 1.0 / torch.sqrt(class_counts.float())   # milder weights
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -199,7 +199,7 @@ if __name__ == "__main__":
         },
     )
 
-    print("\n--- Training with Weighted Cross-Entropy and Balanced Batches ---")
+    print("\n--- Training with Balanced Sampler + sqrt class weights ---")
     trainer.train()
 
     predictions = trainer.predict(tokenized_datasets["validation"])
@@ -229,12 +229,12 @@ if __name__ == "__main__":
         f = f1_score(y_true, y_pred, zero_division=0)
         print(f"{cat:<25} {p*100:5.1f} {r*100:5.1f} {f*100:5.1f}")
 
-    # --- Test set prediction ---
+    # --- Test set prediction (fixed) ---
     test_df = prepare_test_data("Task 4 Test.tsv")
     test_dataset = Dataset.from_pandas(test_df[['text']])
     def tokenize_test(batch):
         return tokenizer(batch["text"], truncation=True, max_length=256)
-    test_tokenized = test_dataset.map(tokenize_test, batched=True)
+    test_tokenized = test_dataset.map(tokenize_test, batched=True, remove_columns=['text'])
 
     test_predictions = trainer.predict(test_tokenized)
     test_probs = torch.nn.functional.softmax(torch.tensor(test_predictions.predictions), dim=-1)[:, 1].numpy()
