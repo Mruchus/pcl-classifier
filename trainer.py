@@ -27,7 +27,7 @@ def prepare_data(file_path):
     df['label'] = df['label'].apply(lambda x: 1 if x >= 2 else 0)
     
     # clean text: remove the @@ID tags and strip whitespace
-    df['text'] = df['text'].str.replace(r'@@\d+', '', regex=True).strip()
+    df['text'] = df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     
     # split into 80% train, 20% dev (stratified to keep class balance)
     train_df, dev_df = train_test_split(
