@@ -38,6 +38,16 @@ def prepare_comprehensive_data(file_path):
     )
     return train_df, dev_df
 
+categories = [
+    "unbalanced_power_relations",
+    "authority_voice",
+    "shallow_solutions",
+    "presupposition",
+    "compassion",
+    "metaphor",
+    "the_people_the_merrier"
+]
+
 class CheckNaNGradCallback(TrainerCallback):
     def on_step_end(self, args, state, control, model=None, **kwargs):
         for name, param in model.named_parameters():
@@ -56,7 +66,7 @@ class PCLComprehensiveTrainer(Trainer):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
-        loss_fct = nn.CrossEntropyLoss(weight=self.class_weights)
+        loss_fct = nn.CrossEntropyLoss(weight=self.class_weights.to(logits.device))
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
@@ -96,23 +106,26 @@ if __name__ == "__main__":
     def tokenize(batch):
         tokenized = tokenizer(batch["text"], truncation=True, max_length=256)
         tokenized["labels"] = batch["label"]
-        tokenized["unbalanced_power_relations"] = batch["unbalanced_power_relations"]
-        tokenized["authority_voice"] = batch["authority_voice"]
-        tokenized["shallow_solutions"] = batch["shallow_solutions"]
-        tokenized["presupposition"] = batch["presupposition"]
-        tokenized["compassion"] = batch["compassion"]
-        tokenized["metaphor"] = batch["metaphor"]
-        tokenized["the_people_the_merrier"] = batch["the_people_the_merrier"]
+        for cat in categories:
+            tokenized[cat] = batch[cat]
         return tokenized
 
     tokenized_datasets = raw_datasets.map(tokenize, batched=True)
+
+    # Keep only the columns we need (tokenizer outputs, labels, and categories)
+    keep_columns = ['input_ids', 'attention_mask', 'labels'] + categories
+    # Include token_type_ids if present
+    if 'token_type_ids' in tokenized_datasets["train"].column_names:
+        keep_columns.append('token_type_ids')
+    for split in tokenized_datasets.keys():
+        tokenized_datasets[split] = tokenized_datasets[split].select_columns(keep_columns)
 
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
     labels_train = tokenized_datasets["train"]["labels"]
     class_counts = torch.bincount(torch.tensor(labels_train))
     class_weights = 1.0 / class_counts.float()
-    class_weights = class_weights.to(model.device) if next(model.parameters()).is_cuda else class_weights
+    # Keep on CPU; will move to device in compute_loss
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -183,16 +196,6 @@ if __name__ == "__main__":
     with open("dev.txt", "w") as f:
         for p in final_preds:
             f.write(f"{p}\n")
-
-    categories = [
-        "unbalanced_power_relations",
-        "authority_voice",
-        "shallow_solutions",
-        "presupposition",
-        "compassion",
-        "metaphor",
-        "the_people_the_merrier"
-    ]
 
     print("\n--- Per-Category Results (Binary Model) ---")
     print(f"{'Category':<25} {'P':>6} {'R':>6} {'F1':>6}")
