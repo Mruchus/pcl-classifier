@@ -107,7 +107,7 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=9e-7,               # very low LR
+        lr=1e-7,               # very low LR
         weight_decay=0.1,       # strong regularization
         eps=1e-6
     )
