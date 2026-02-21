@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import torch
 from torch import nn
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer,
@@ -99,7 +99,6 @@ if __name__ == "__main__":
 
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
-    # Compute class weights from the imbalanced training set
     labels_train = tokenized_datasets["train"]["labels"]
     class_counts = torch.bincount(torch.tensor(labels_train))
     class_weights = 1.0 / class_counts.float()
@@ -107,8 +106,8 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=9e-7,               # very low LR
-        weight_decay=0.1,       # strong regularization
+        lr=9e-7,
+        weight_decay=0.1,
         eps=1e-6
     )
 
@@ -127,7 +126,7 @@ if __name__ == "__main__":
         output_dir="./pcl_final",
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=2,      # effective batch size 32
+        gradient_accumulation_steps=2,
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
@@ -159,7 +158,6 @@ if __name__ == "__main__":
     print("\n--- Training: Imbalanced data + Class Weights (LR=1e-5, wd=0.1, grad accum=2) ---")
     trainer.train()
 
-    # Dev set predictions + threshold tuning
     predictions = trainer.predict(tokenized_datasets["validation"])
     probs = torch.nn.functional.softmax(torch.tensor(predictions.predictions), dim=-1)[:, 1].numpy()
     true_labels = predictions.label_ids
@@ -173,11 +171,20 @@ if __name__ == "__main__":
     print(f"Optimal Threshold: {best_t:.2f} | Max F1: {best_f1:.4f}")
     final_preds = (probs > best_t).astype(int)
 
+    precision = precision_score(true_labels, final_preds)
+    recall = recall_score(true_labels, final_preds)
+    cm = confusion_matrix(true_labels, final_preds)
+    print(f"\nMetrics at threshold {best_t:.2f}:")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print(f"F1:        {best_f1:.4f}")
+    print("\nConfusion Matrix:")
+    print(cm)
+
     with open("dev.txt", "w") as f:
         for p in final_preds:
             f.write(f"{p}\n")
 
-    # Test set prediction
     test_df = prepare_test_data("Task 4 Test.tsv")
     test_dataset = Dataset.from_pandas(test_df[['text']])
     def tokenize_test(batch):
