@@ -30,7 +30,6 @@ def prepare_comprehensive_data(pcl_file, train_labels_file, dev_labels_file):
     df = df[df['text'].str.strip() != '']
     df = df[df['text'].str.len() > 10]
 
-    # Load official train/dev IDs
     train_ids = pd.read_csv(train_labels_file)['par_id'].tolist()
     dev_ids = pd.read_csv(dev_labels_file)['par_id'].tolist()
 
@@ -59,15 +58,11 @@ class CheckNaNGradCallback(TrainerCallback):
         return control
 
 class PCLComprehensiveTrainer(Trainer):
-    def __init__(self, class_weights, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.class_weights = class_weights
-
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
-        loss_fct = nn.CrossEntropyLoss(weight=self.class_weights.to(logits.device, dtype=logits.dtype))
+        loss_fct = nn.CrossEntropyLoss()   # no class weights
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
@@ -76,8 +71,8 @@ class PCLComprehensiveTrainer(Trainer):
         data_collator = self.data_collator
         labels = train_dataset["labels"]
         class_counts = torch.bincount(torch.tensor(labels))
-        # Use sqrt weights for milder emphasis
-        class_weights = 1.0 / torch.sqrt(class_counts.float())
+        # Use inverse frequencies for sampling (balanced batches)
+        class_weights = 1.0 / class_counts.float()
         sample_weights = class_weights[labels]
         sampler = WeightedRandomSampler(
             weights=sample_weights,
@@ -124,23 +119,18 @@ if __name__ == "__main__":
 
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
-    # Compute class weights for the loss (using sqrt, applied in trainer's __init__)
-    labels_train = tokenized_datasets["train"]["labels"]
-    class_counts = torch.bincount(torch.tensor(labels_train))
-    class_weights = 1.0 / torch.sqrt(class_counts.float())   # milder weights
-    print(f"Class counts: {class_counts}, sqrt weights: {class_weights}")
-
+    # Lower LR, higher weight decay, longer warmup
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=5e-5,
-        weight_decay=0.01,
+        lr=2e-5,
+        weight_decay=0.1,
         eps=1e-6
     )
 
     batch_size = 16
     num_epochs = 5
     total_steps = len(tokenized_datasets["train"]) // batch_size * num_epochs
-    warmup_steps = 500
+    warmup_steps = 1000   # longer warmup
 
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -165,7 +155,6 @@ if __name__ == "__main__":
     )
 
     trainer = PCLComprehensiveTrainer(
-        class_weights=class_weights,
         model=model,
         args=training_args,
         train_dataset=tokenized_datasets["train"],
@@ -180,7 +169,7 @@ if __name__ == "__main__":
         },
     )
 
-    print("\n--- Training with Balanced Sampler + sqrt‑weighted CE (official split) ---")
+    print("\n--- Training: Balanced Sampler + Standard CE (LR=2e-5, wd=0.1) ---")
     trainer.train()
 
     # Dev set predictions + threshold tuning
