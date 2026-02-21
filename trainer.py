@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import WeightedRandomSampler
 from sklearn.metrics import f1_score
 from datasets import Dataset, DatasetDict
 from transformers import (
@@ -58,36 +57,17 @@ class CheckNaNGradCallback(TrainerCallback):
         return control
 
 class PCLComprehensiveTrainer(Trainer):
+    def __init__(self, class_weights, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
-        loss_fct = nn.CrossEntropyLoss()   # no class weights
+        loss_fct = nn.CrossEntropyLoss(weight=self.class_weights.to(logits.device, dtype=logits.dtype))
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
-
-    def get_train_dataloader(self):
-        train_dataset = self.train_dataset
-        data_collator = self.data_collator
-        labels = train_dataset["labels"]
-        class_counts = torch.bincount(torch.tensor(labels))
-        # Use inverse frequencies for sampling (balanced batches)
-        class_weights = 1.0 / class_counts.float()
-        sample_weights = class_weights[labels]
-        sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True
-        )
-        return torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=self.args.per_device_train_batch_size,
-            sampler=sampler,
-            collate_fn=data_collator,
-            drop_last=self.args.dataloader_drop_last,
-            num_workers=self.args.dataloader_num_workers,
-            pin_memory=self.args.dataloader_pin_memory,
-        )
 
 if __name__ == "__main__":
     train_df, dev_df = prepare_comprehensive_data(
@@ -119,18 +99,23 @@ if __name__ == "__main__":
 
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
-    # Lower LR, higher weight decay, longer warmup
+    # Compute class weights from the imbalanced training set
+    labels_train = tokenized_datasets["train"]["labels"]
+    class_counts = torch.bincount(torch.tensor(labels_train))
+    class_weights = 1.0 / class_counts.float()
+    print(f"Class counts: {class_counts}, weights: {class_weights}")
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=2e-5,
-        weight_decay=0.1,
+        lr=1e-5,               # very low LR
+        weight_decay=0.1,       # strong regularization
         eps=1e-6
     )
 
     batch_size = 16
-    num_epochs = 5
+    num_epochs = 8
     total_steps = len(tokenized_datasets["train"]) // batch_size * num_epochs
-    warmup_steps = 1000   # longer warmup
+    warmup_steps = 1000
 
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -142,6 +127,7 @@ if __name__ == "__main__":
         output_dir="./pcl_final",
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=2,      # effective batch size 32
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
@@ -155,6 +141,7 @@ if __name__ == "__main__":
     )
 
     trainer = PCLComprehensiveTrainer(
+        class_weights=class_weights,
         model=model,
         args=training_args,
         train_dataset=tokenized_datasets["train"],
@@ -169,7 +156,7 @@ if __name__ == "__main__":
         },
     )
 
-    print("\n--- Training: Balanced Sampler + Standard CE (LR=2e-5, wd=0.1) ---")
+    print("\n--- Training: Imbalanced data + Class Weights (LR=1e-5, wd=0.1, grad accum=2) ---")
     trainer.train()
 
     # Dev set predictions + threshold tuning
