@@ -13,6 +13,8 @@ from transformers import (
     TrainerCallback,
     get_linear_schedule_with_warmup
 )
+import itertools
+import copy
 
 def prepare_comprehensive_data(pcl_file, train_labels_file, dev_labels_file):
     cols = ['id', 'public_id', 'keyword', 'country', 'text', 'label']
@@ -69,6 +71,89 @@ class PCLComprehensiveTrainer(Trainer):
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
+def train_and_evaluate(params, train_dataset, eval_dataset, test_tokenized, class_weights, device):
+    # create a fresh model for each run
+    model = AutoModelForSequenceClassification.from_pretrained("microsoft/deberta-v3-base", num_labels=2).to(device)
+    
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=params['lr'],
+        weight_decay=params['weight_decay'],
+        eps=1e-6
+    )
+
+    # calculate steps
+    batch_size = 16
+    num_epochs = 10
+    total_steps = len(train_dataset) // batch_size * num_epochs
+    warmup_steps = params['warmup_steps']
+
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
+
+    training_args = TrainingArguments(
+        output_dir=f"./pcl_final_lr{params['lr']}_wd{params['weight_decay']}_acc{params['grad_accum']}_warm{params['warmup_steps']}",
+        num_train_epochs=num_epochs,
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=params['grad_accum'],
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="f1",
+        warmup_steps=warmup_steps,
+        logging_steps=50,
+        max_grad_norm=1.0,
+        fp16=False,
+        bf16=False,
+        remove_unused_columns=False,
+    )
+
+    trainer = PCLComprehensiveTrainer(
+        class_weights=class_weights,
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        processing_class=tokenizer,
+        data_collator=DataCollatorWithPadding(tokenizer),
+        optimizers=(optimizer, scheduler),
+        callbacks=[CheckNaNGradCallback()],
+        compute_metrics=lambda p: {
+            "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1)),
+            "num_pos_pred": np.sum(np.argmax(p.predictions, axis=-1))
+        },
+    )
+
+    trainer.train()
+
+    # validation predictions + threshold tuning
+    predictions = trainer.predict(eval_dataset)
+    probs = torch.nn.functional.softmax(torch.tensor(predictions.predictions), dim=-1)[:, 1].numpy()
+    true_labels = predictions.label_ids
+
+    best_t, best_f1 = 0.5, 0
+    for t in np.arange(0.2, 0.7, 0.01):
+        f1 = f1_score(true_labels, (probs > t).astype(int))
+        if f1 > best_f1:
+            best_f1, best_t = f1, t
+
+    # test set predictions with best threshold
+    test_predictions = trainer.predict(test_tokenized)
+    test_probs = torch.nn.functional.softmax(torch.tensor(test_predictions.predictions), dim=-1)[:, 1].numpy()
+    test_preds = (test_probs > best_t).astype(int)
+
+    # dev set predictions at best threshold (for later saving)
+    dev_preds = (probs > best_t).astype(int)
+
+    # clean up to free memory
+    del model
+    torch.cuda.empty_cache()
+
+    return best_f1, best_t, dev_preds, test_preds, predictions.label_ids
+
 if __name__ == "__main__":
     train_df, dev_df = prepare_comprehensive_data(
         "dontpatronizeme_pcl.tsv",
@@ -97,104 +182,89 @@ if __name__ == "__main__":
     for split in tokenized_datasets.keys():
         tokenized_datasets[split] = tokenized_datasets[split].select_columns(keep_columns)
 
-    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
-
+    # precompute class weights
     labels_train = tokenized_datasets["train"]["labels"]
     class_counts = torch.bincount(torch.tensor(labels_train))
     class_weights = 1.0 / class_counts.float()
     print(f"Class counts: {class_counts}, weights: {class_weights}")
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=9e-7,
-        weight_decay=0.1,
-        eps=1e-6
-    )
-
-    batch_size = 16
-    num_epochs = 10
-    total_steps = len(tokenized_datasets["train"]) // batch_size * num_epochs
-    warmup_steps = 1000
-
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
-    )
-
-    training_args = TrainingArguments(
-        output_dir="./pcl_final",
-        num_train_epochs=num_epochs,
-        per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=2,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="f1",
-        warmup_steps=warmup_steps,
-        logging_steps=50,
-        max_grad_norm=1.0,
-        fp16=False,
-        bf16=False,
-        remove_unused_columns=False,
-    )
-
-    trainer = PCLComprehensiveTrainer(
-        class_weights=class_weights,
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_datasets["train"],
-        eval_dataset=tokenized_datasets["validation"],
-        processing_class=tokenizer,
-        data_collator=DataCollatorWithPadding(tokenizer),
-        optimizers=(optimizer, scheduler),
-        callbacks=[CheckNaNGradCallback()],
-        compute_metrics=lambda p: {
-            "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1)),
-            "num_pos_pred": np.sum(np.argmax(p.predictions, axis=-1))
-        },
-    )
-
-    print("\n--- Training: Imbalanced data + Class Weights (LR=1e-5, wd=0.1, grad accum=2) ---")
-    trainer.train()
-
-    predictions = trainer.predict(tokenized_datasets["validation"])
-    probs = torch.nn.functional.softmax(torch.tensor(predictions.predictions), dim=-1)[:, 1].numpy()
-    true_labels = predictions.label_ids
-
-    best_t, best_f1 = 0.5, 0
-    for t in np.arange(0.2, 0.7, 0.01):
-        f1 = f1_score(true_labels, (probs > t).astype(int))
-        if f1 > best_f1:
-            best_f1, best_t = f1, t
-
-    print(f"Optimal Threshold: {best_t:.2f} | Max F1: {best_f1:.4f}")
-    final_preds = (probs > best_t).astype(int)
-
-    precision = precision_score(true_labels, final_preds)
-    recall = recall_score(true_labels, final_preds)
-    cm = confusion_matrix(true_labels, final_preds)
-    print(f"\nMetrics at threshold {best_t:.2f}:")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall:    {recall:.4f}")
-    print(f"F1:        {best_f1:.4f}")
-    print("\nConfusion Matrix:")
-    print(cm)
-
-    with open("dev.txt", "w") as f:
-        for p in final_preds:
-            f.write(f"{p}\n")
-
+    # prepare test tokenised dataset
     test_df = prepare_test_data("Task 4 Test.tsv")
     test_dataset = Dataset.from_pandas(test_df[['text']])
     def tokenize_test(batch):
         return tokenizer(batch["text"], truncation=True, max_length=256)
     test_tokenized = test_dataset.map(tokenize_test, batched=True, remove_columns=['text'])
 
-    test_predictions = trainer.predict(test_tokenized)
-    test_probs = torch.nn.functional.softmax(torch.tensor(test_predictions.predictions), dim=-1)[:, 1].numpy()
-    test_preds = (test_probs > best_t).astype(int)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    with open("test.txt", "w") as f:
-        for p in test_preds:
+    # define hyperparameter grid
+    lr_list = [8e-7, 9e-7, 1e-6]
+    wd_list = [0.01, 0.05, 0.1]
+    accum_list = [1, 2, 4] # gradient accumulation steps -> effective batch sizes 16,32,64
+    warmup_list = [500, 1000, 1500]
+
+    # generate all combinations
+    param_combinations = list(itertools.product(lr_list, wd_list, accum_list, warmup_list))
+    print(f"Total combinations: {len(param_combinations)}")
+
+    best_f1_overall = 0.0
+    best_params = None
+    best_dev_preds = None
+    best_test_preds = None
+    best_true_labels = None
+    best_threshold = None
+
+    for lr, wd, accum, warmup in param_combinations:
+        params = {
+            'lr': lr,
+            'weight_decay': wd,
+            'grad_accum': accum,
+            'warmup_steps': warmup
+        }
+        print(f"\n--- Testing params: {params} ---")
+        try:
+            f1, thresh, dev_preds, test_preds, true_labels = train_and_evaluate(
+                params,
+                tokenized_datasets["train"],
+                tokenized_datasets["validation"],
+                test_tokenized,
+                class_weights,
+                device
+            )
+            print(f"--> Best F1 = {f1:.4f} at threshold {thresh:.2f}")
+            if f1 > best_f1_overall:
+                best_f1_overall = f1
+                best_params = params.copy()
+                best_threshold = thresh
+                best_dev_preds = dev_preds.copy()
+                best_test_preds = test_preds.copy()
+                best_true_labels = true_labels.copy()
+        except Exception as e:
+            print(f"Run failed: {e}")
+            continue
+
+    print("\n" + "="*50)
+    print(f"Best F1 overall: {best_f1_overall:.4f}")
+    print(f"Best parameters: {best_params}")
+    print(f"Best threshold: {best_threshold:.2f}")
+
+    # compute final metrics on dev set for best run
+    precision = precision_score(best_true_labels, best_dev_preds)
+    recall = recall_score(best_true_labels, best_dev_preds)
+    cm = confusion_matrix(best_true_labels, best_dev_preds)
+    print(f"\nMetrics at best threshold {best_threshold:.2f}:")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print(f"F1:        {best_f1_overall:.4f}")
+    print("\nConfusion Matrix:")
+    print(cm)
+
+    # save the best dev and test predictions
+    with open("dev.txt", "w") as f:
+        for p in best_dev_preds:
             f.write(f"{p}\n")
+    with open("test.txt", "w") as f:
+        for p in best_test_preds:
+            f.write(f"{p}\n")
+
+    print("\nBest predictions saved to dev.txt and test.txt")
