@@ -107,13 +107,13 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=1e-6,               # very low LR
+        lr=9e-7,               # very low LR
         weight_decay=0.1,       # strong regularization
         eps=1e-6
     )
 
     batch_size = 16
-    num_epochs = 1
+    num_epochs = 10
     total_steps = len(tokenized_datasets["train"]) // batch_size * num_epochs
     warmup_steps = 1000
 
