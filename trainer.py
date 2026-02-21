@@ -113,7 +113,7 @@ if __name__ == "__main__":
     )
 
     batch_size = 16
-    num_epochs = 8
+    num_epochs = 1
     total_steps = len(tokenized_datasets["train"]) // batch_size * num_epochs
     warmup_steps = 1000
 
