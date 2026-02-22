@@ -197,24 +197,20 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # define hyperparameter grid
-    lr_list = [8e-7, 9e-7, 1e-6]
-    wd_list = [0.01, 0.05, 0.1]
-    accum_list = [1, 2, 4] # gradient accumulation steps -> effective batch sizes 16,32,64
-    warmup_list = [500, 1000, 1500]
+    # # define hyperparameter grid
+    # lr_list = [8e-7, 9e-7, 1e-6]
+    # wd_list = [0.01, 0.05, 0.1]
+    # accum_list = [1, 2, 4] # gradient accumulation steps -> effective batch sizes 16,32,64
+    # warmup_list = [500, 1000, 1500]
+    
+    lr_list = [1.2e-6]
+    wd_list = [0.1, 0.2]
+    accum_list = [2]
+    warmup_list = [1500, 2000]
 
-    # # generate all combinations
-    # param_combinations = list(itertools.product(lr_list, wd_list, accum_list, warmup_list))
-    # print(f"Total combinations: {len(param_combinations)}")
 
-    param_combinations = [
-        {'lr': 8e-7, 'weight_decay': 0.1, 'grad_accum': 4, 'warmup_steps': 1500},
-        {'lr': 9e-7, 'weight_decay': 0.1, 'grad_accum': 2, 'warmup_steps': 1500},
-        {'lr': 9e-7, 'weight_decay': 0.05, 'grad_accum': 4, 'warmup_steps': 1500},
-        {'lr': 1e-6, 'weight_decay': 0.1, 'grad_accum': 2, 'warmup_steps': 1500},
-        {'lr': 1e-6, 'weight_decay': 0.05, 'grad_accum': 4, 'warmup_steps': 1500},
-    ]
-
+    # generate all combinations
+    param_combinations = list(itertools.product(lr_list, wd_list, accum_list, warmup_list))
     print(f"Total combinations: {len(param_combinations)}")
 
     best_f1_overall = 0.0
@@ -224,13 +220,13 @@ if __name__ == "__main__":
     best_true_labels = None
     best_threshold = None
 
-    for params in param_combinations:
-        # params = {
-        #     'lr': lr,
-        #     'weight_decay': wd,
-        #     'grad_accum': accum,
-        #     'warmup_steps': warmup
-        # }
+    for lr, wd, accum, warmup in param_combinations:
+        params = {
+            'lr': lr,
+            'weight_decay': wd,
+            'grad_accum': accum,
+            'warmup_steps': warmup
+        }
         print(f"\n--- Testing params: {params} ---")
         try:
             f1, thresh, dev_preds, test_preds, true_labels = train_and_evaluate(
