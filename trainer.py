@@ -197,21 +197,17 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # # define hyperparameter grid
-    # lr_list = [8e-7, 9e-7, 1e-6]
-    # wd_list = [0.01, 0.05, 0.1]
-    # accum_list = [1, 2, 4] # gradient accumulation steps -> effective batch sizes 16,32,64
-    # warmup_list = [500, 1000, 1500]
-    
-    lr_list = [1.2e-6]
-    wd_list = [0.1, 0.2]
-    accum_list = [2]
-    warmup_list = [1500, 2000]
-
+    # define hyperparameter grid
+    lr_list = [8e-7, 9e-7, 1e-6, 1.2e-6]
+    wd_list = [0.01, 0.05, 0.1, 0.2]
+    accum_list = [1, 2, 4] # gradient accumulation steps -> effective batch sizes 16,32,64
+    warmup_list = [500, 1000, 1500, 2000]
 
     # generate all combinations
     param_combinations = list(itertools.product(lr_list, wd_list, accum_list, warmup_list))
     print(f"Total combinations: {len(param_combinations)}")
+     
+    param_combinations = [(1e-6, 0.1, 2, 1500)]
 
     best_f1_overall = 0.0
     best_params = None
