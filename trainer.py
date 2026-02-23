@@ -276,7 +276,7 @@ if __name__ == "__main__":
     accum = 2
     warmup = 1500
 
-    seeds = [42, 123, 456, 789, 101, 202, 303, 404, 505, 606, 707, 808, 909, 111, 222, 333]
+    seeds = [127]
     print(f"Running {len(seeds)} trials with different seeds")
 
     best_f1_overall = 0.0
