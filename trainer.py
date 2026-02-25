@@ -1,3 +1,4 @@
+import random
 import pandas as pd
 import numpy as np
 import torch
@@ -15,6 +16,16 @@ from transformers import (
 )
 import itertools
 import copy
+
+def set_seed(seed=127):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(127)   # use seed 127
 
 def prepare_data(pcl_file, train_labels_file, dev_labels_file):
     # load the main dataset
