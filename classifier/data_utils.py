@@ -10,8 +10,8 @@ def prepare_data(pcl_file, train_labels_file, dev_labels_file):
         names=cols, index_col='id', quoting=3
     )
 
-    # drop rows were text or label is missing
-    df = df.dropna(subset=['text', 'label'])
+    # fill missing text with empty string so we can still build the final field
+    df['text'] = df['text'].fillna('')
 
     # converts the original multi‑class labels (0–4) into binary labels
     df['label'] = df['label'].apply(lambda x: 1 if x >= 2 else 0)
@@ -28,30 +28,19 @@ def prepare_data(pcl_file, train_labels_file, dev_labels_file):
     train_ids = pd.read_csv(train_labels_file)['par_id'].tolist()
     dev_ids = pd.read_csv(dev_labels_file)['par_id'].tolist()
 
-    print(f"df.index.dtype: {df.index.dtype}")
-    print(f"First 5 dev_ids: {dev_ids[:5]}")
-    print(f"Type of first dev_id: {type(dev_ids[0])}")
-    print(f"Is 8640 in df.index? {8640 in df.index}")
-    print(f"Total dev IDs: {len(dev_ids)}")
-    print(f"Dev IDs present in df: {sum(df.index.isin(dev_ids))}")
-
     # split DataFrame (currently whole dataset) into train and dev
     # based on the paragraph IDs
     train_df = df[df.index.isin(train_ids)]
     dev_df = df[df.index.isin(dev_ids)]
 
-    missing = set(dev_ids) - set(dev_df.index)
-    if missing:
-        print(f"WARNING: Missing dev IDs: {missing}")
-    else:
-        print("All dev IDs present.")
-
-    # ensure dev set is in the exact order that the ids are listed
-    dev_df = dev_df.loc[dev_ids]
-
-    # cut out very short texts (less than 10 characters)
+    # for training only: cut out very short texts (less than 10 characters)
     train_df = train_df[train_df['text'].str.strip() != '']
     train_df = train_df[train_df['text'].str.len() > 10]
+
+    # for dev: we keep all rows, but we must ensure the order matches the original list
+    # first filter dev_ids to only those that exist in dev_df (all should exist now)
+    present_dev_ids = [id for id in dev_ids if id in dev_df.index]
+    dev_df = dev_df.loc[present_dev_ids]
 
     return train_df, dev_df
 
