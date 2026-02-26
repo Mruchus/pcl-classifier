@@ -224,7 +224,7 @@ if __name__ == "__main__":
         true_labels = predictions.label_ids
 
         best_t, best_f1 = 0.5, 0.0
-        for t in np.arange(0.2, 0.7, 0.01):
+        for t in np.arange(0, 1, 0.01):
             f1 = f1_score(true_labels, (probs > t).astype(int))
             if f1 > best_f1:
                 best_f1, best_t = f1, t
