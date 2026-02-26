@@ -208,7 +208,7 @@ if __name__ == "__main__":
             optimizers=(optimizer, scheduler),
             callbacks=[CheckNaNGradCallback()],
             compute_metrics=lambda p: {
-                "f1": f1_score(p.label_ids, (p.predictions.squeeze(-1) > 0).astype(int))
+                "f1": f1_score(p.label_ids, (p.predictions.squeeze(-1) > 0).astype(int)),
                 "num_pos_pred": int(np.sum(p.predictions.squeeze(-1) > 0))
             },
         )
