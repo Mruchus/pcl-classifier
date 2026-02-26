@@ -169,7 +169,7 @@ if __name__ == "__main__":
         # compute total training steps and set warmup
         batch_size = 16
         num_epochs = 10
-        total_steps = len(tokenized_datasets["train"]) // batch_size * num_epochs
+        total_steps = (len(tokenized_datasets["train"]) // batch_size // accum) * num_epochs
         warmup_steps = warmup
 
         # learning rate scheduler: linear warmup + linear decay
@@ -208,8 +208,8 @@ if __name__ == "__main__":
             optimizers=(optimizer, scheduler),
             callbacks=[CheckNaNGradCallback()],
             compute_metrics=lambda p: {
-                "f1": f1_score(p.label_ids, np.argmax(p.predictions, axis=-1)),
-                "num_pos_pred": np.sum(np.argmax(p.predictions, axis=-1))
+                "f1": f1_score(p.label_ids, (p.predictions.squeeze(-1) > 0).astype(int))
+                "num_pos_pred": int(np.sum(p.predictions.squeeze(-1) > 0))
             },
         )
 
@@ -218,7 +218,7 @@ if __name__ == "__main__":
         # after training, get predictions on validation set and find optimal threshold
         # note: predictions[0] are the sequence logits (the token logits are also returned but we ignore them here)
         predictions = trainer.predict(tokenized_datasets["validation"])
-        probs = torch.sigmoid(torch.tensor(predictions.predictions[0])).numpy()   # shape (n,)
+        probs = torch.sigmoid(torch.tensor(predictions.predictions[0])).squeeze(-1).numpy()  # shape (n,)
         true_labels = predictions.label_ids
 
         # loop through thresholds from 0.20 to 0.69 (in steps of 0.01) 

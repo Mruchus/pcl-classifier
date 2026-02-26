@@ -13,6 +13,7 @@ class PCLClassifier(PreTrainedModel):
 
     def forward(self, input_ids, attention_mask, token_labels=None):
         outputs = self.deberta(input_ids=input_ids, attention_mask=attention_mask)
+        hidden = outputs.last_hidden_state.float()
         seq_logits = self.seq_classifier(outputs.last_hidden_state[:, 0, :]) # [CLS]
         token_logits = self.token_classifier(outputs.last_hidden_state).squeeze(-1) # (batch, seq_len)
         token_logits = token_logits * attention_mask # mask padding
