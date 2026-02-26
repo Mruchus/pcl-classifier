@@ -27,11 +27,11 @@ def set_seed(seed=127):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
 class PCLTrainer(Trainer):
-    def __init__(self, alpha=0.5, *args, **kwargs):
+    def __init__(self, alpha=0.5, pos_weight=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
+        self.pos_weight = pos_weight
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.get("labels")
@@ -39,7 +39,7 @@ class PCLTrainer(Trainer):
 
         seq_logits, token_logits = model(**inputs)
 
-        loss_fct_seq = nn.BCEWithLogitsLoss()
+        loss_fct_seq = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
         seq_loss = loss_fct_seq(seq_logits.squeeze(-1), labels.float())
 
         loss_fct_token = nn.BCEWithLogitsLoss(reduction='none')
@@ -47,7 +47,6 @@ class PCLTrainer(Trainer):
         token_loss = (token_loss * inputs['attention_mask']).sum() / inputs['attention_mask'].sum()
 
         loss = self.alpha * seq_loss + (1 - self.alpha) * token_loss
-
         return (loss, seq_logits) if return_outputs else loss
 
     def prediction_step(
@@ -197,8 +196,11 @@ if __name__ == "__main__":
             remove_unused_columns=False,
         )
 
+        pos_weight = class_weights_seq[1:2].to(device)
+        
         trainer = PCLTrainer(
             alpha=alpha,
+            pos_weight=pos_weight,
             model=model,
             args=training_args,
             train_dataset=tokenized_datasets["train"],
