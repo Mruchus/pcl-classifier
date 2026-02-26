@@ -34,21 +34,22 @@ class PCLTrainer(Trainer):
         self.alpha = alpha
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        labels       = inputs.pop("labels")        # paragraph labels
-        token_labels = inputs.pop("token_labels")  # token labels
+        labels       = inputs.pop("labels")
+        token_labels = inputs.pop("token_labels")
         seq_logits, token_logits = model(**inputs)
 
-        # paragraph loss
         loss_fct_seq = nn.BCEWithLogitsLoss()
         seq_loss = loss_fct_seq(seq_logits.squeeze(-1), labels.float())
 
-        # token loss (only over active tokens)
         loss_fct_token = nn.BCEWithLogitsLoss(reduction='none')
         token_loss = loss_fct_token(token_logits, token_labels.float())
         token_loss = (token_loss * inputs['attention_mask']).sum() / inputs['attention_mask'].sum()
 
         loss = self.alpha * seq_loss + (1 - self.alpha) * token_loss
-        return (loss, (seq_logits, token_logits)) if return_outputs else loss
+
+        # Only return seq_logits — returning the full tuple confuses the Trainer
+        # and causes compute_metrics to receive a malformed predictions structure
+        return (loss, seq_logits) if return_outputs else loss
 
 class CheckNaNGradCallback(TrainerCallback):
     def on_step_end(self, args, state, control, model=None, **kwargs):
@@ -60,16 +61,11 @@ class CheckNaNGradCallback(TrainerCallback):
         return control 
 
 def compute_metrics(p):
-    try:
-        seq_logits = p.predictions[0]
-        preds = (seq_logits.squeeze(-1) > 0).astype(int)
-        return {
-            "f1": f1_score(p.label_ids, preds, zero_division=0),
-            "num_pos_pred": int(np.sum(preds))
-        }
-    except Exception as e:
-        print(f"compute_metrics error: {e}, predictions type: {type(p.predictions)}, shape: {getattr(p.predictions, 'shape', 'N/A')}")
-        raise
+    preds = (p.predictions.squeeze(-1) > 0).astype(int)  # p.predictions is now cleanly (n, 1)
+    return {
+        "f1": f1_score(p.label_ids, preds, zero_division=0),
+        "num_pos_pred": int(np.sum(preds))
+    }
 
 
 if __name__ == "__main__":
