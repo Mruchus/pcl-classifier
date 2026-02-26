@@ -56,11 +56,25 @@ def prepare_test_data(test_file):
     return test_df
 
 def load_span_data(categories_file):
-    span_df = pd.read_csv(categories_file, sep='\t')
+    # columns: par_id, art_id, text, keyword, country_code, span_start, span_finish, span_text, pcl_category, num_annotators
+    # use the Python engine to be more forgiving, and explicitly name the columns
+    span_df = pd.read_csv(
+        categories_file,
+        sep='\t',
+        header=None,  # the file has no header row
+        names=['par_id', 'art_id', 'text', 'keyword', 'country_code',
+               'span_start', 'span_finish', 'span_text', 'pcl_category', 'num_annotators'],
+        engine='python',      # handles inconsistent lines better
+        quoting=3,            # QUOTE_NONE – treat quotes as regular characters
+        on_bad_lines='warn'   # warns about bad lines but continues (optional)
+    )
+    # Group by par_id and collect spans as list of (start, end) tuples
     spans_by_par = {}
     for _, row in span_df.iterrows():
         pid = row['par_id']
-        spans_by_par.setdefault(pid, []).append((row['span_start'], row['span_finish']))
+        start = row['span_start']
+        end = row['span_finish']
+        spans_by_par.setdefault(pid, []).append((start, end))
     return spans_by_par
 
 def create_token_labels(text, spans, tokenizer, max_length):
