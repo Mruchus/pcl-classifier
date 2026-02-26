@@ -39,7 +39,6 @@ class PCLTrainer(Trainer):
         token_labels = inputs.pop("token_labels")  # pop is fine — Trainer doesn't need this
 
         seq_logits, token_logits = model(**inputs)  # labels passed via **kwargs, absorbed harmlessly
-        
         loss_fct_seq = nn.BCEWithLogitsLoss()
         seq_loss = loss_fct_seq(seq_logits.squeeze(-1), labels.float())
 
@@ -194,9 +193,12 @@ if __name__ == "__main__":
 
         trainer.train()
 
-        # find optimal threshold on validation set
         predictions = trainer.predict(tokenized_datasets["validation"])
-        probs       = torch.sigmoid(torch.tensor(predictions.predictions[0])).squeeze(-1).numpy()
+
+        probs = torch.sigmoid(
+            torch.tensor(predictions.predictions)
+        ).squeeze(-1).numpy()
+
         true_labels = predictions.label_ids
 
         best_t, best_f1 = 0.5, 0.0
@@ -205,9 +207,12 @@ if __name__ == "__main__":
             if f1 > best_f1:
                 best_f1, best_t = f1, t
 
-        # test predictions using best validation threshold
         test_predictions = trainer.predict(test_tokenized)
-        test_probs = torch.sigmoid(torch.tensor(test_predictions.predictions[0])).squeeze(-1).numpy()
+
+        test_probs = torch.sigmoid(
+            torch.tensor(test_predictions.predictions)
+        ).squeeze(-1).numpy()
+
         test_preds = (test_probs > best_t).astype(int)
         dev_preds  = (probs > best_t).astype(int)
 
