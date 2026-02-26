@@ -67,9 +67,9 @@ class CheckNaNGradCallback(TrainerCallback):
 if __name__ == "__main__":
     # load and split data according to official train/dev IDs
     train_df, dev_df = prepare_data(
-        "..\dontpatronizeme_pcl.tsv",
-        "..\SemEval 2022 Train Labels.csv",
-        "..\Semeval 2022 Dev Labels.csv"
+        "../dontpatronizeme_pcl.tsv",
+        "../SemEval 2022 Train Labels.csv",
+        "../Semeval 2022 Dev Labels.csv"
     )
 
     # load span annotations from the categories file
