@@ -1,45 +1,51 @@
 import pandas as pd
 import numpy as np
 
-def prepare_data(pcl_file, train_labels_file, dev_labels_file):
+def prepare_data(pcl_file, train_labels_file, dev_labels_file, spans_by_par=None):
     cols = ['id', 'public_id', 'keyword', 'country', 'text', 'label']
     df = pd.read_csv(
         pcl_file, sep='\t', skipinitialspace=True,
-        names=cols, index_col=False, quoting=3
+        names=cols, index_col='id', quoting=3
     )
-    df.columns = ['par_id', 'public_id', 'keyword', 'country', 'text', 'label']
-    df['label'] = df['label'].apply(lambda x: 0 if x in [0, 1] else 1)
-    df['text'] = df['text'].fillna('').astype(str)
 
-    span_df = pd.read_csv(
-        'Dont Patronize Me Categories.tsv', sep='\t', header=None,
-        names=['par_id', 'art_id', 'text', 'keyword', 'country_code',
-               'span_start', 'span_finish', 'span_text', 'pcl_category', 'num_annotators'],
-        engine='python', quoting=3, on_bad_lines='warn'
+    df['text'] = df['text'].fillna('')
+    df['label'] = df['label'].apply(lambda x: 1 if x >= 2 else 0)
+    df['text'] = (
+        df['keyword'].fillna('') + " [SEP] " +
+        df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     )
 
     train_ids = pd.read_csv(train_labels_file)['par_id'].tolist()
     dev_ids   = pd.read_csv(dev_labels_file)['par_id'].tolist()
 
-    def build_split(ids):
-        span_data = span_df[span_df['par_id'].isin(ids)][['par_id', 'span_text']]
-        span_data.columns = ['par_id', 'span_label']
+    train_df = df[df.index.isin(train_ids)].copy()
+    dev_df   = df[df.index.isin(dev_ids)].copy()
 
-        main = df[df['par_id'].isin(ids)][['par_id', 'text', 'label']]
-        main['text'] = main['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
+    train_df = train_df[train_df['text'].str.strip() != '']
+    train_df = train_df[train_df['text'].str.len() > 10]
 
-        # Right join: one row per span annotation (annotated examples duplicated)
-        with_spans    = pd.merge(main, span_data, on='par_id', how='right')
-        # Left join remainder: examples with no spans
-        without_spans = pd.merge(main, span_data, on='par_id', how='left')
-        without_spans = without_spans[without_spans['span_label'].isna()]
+    # Replicate friend's right join: one row per span annotation,
+    # so annotated examples appear multiple times in training
+    if spans_by_par is not None:
+        rows = []
+        for pid, row in train_df.iterrows():
+            spans = spans_by_par.get(pid, [])
+            if spans:
+                for span in spans:
+                    new_row = row.copy()
+                    new_row.name = pid
+                    rows.append((pid, new_row))
+            else:
+                rows.append((pid, row))
+        train_df = pd.DataFrame([r for _, r in rows])
+        train_df.index = [pid for pid, _ in rows]
 
-        merged = pd.concat([with_spans, without_spans], ignore_index=True)
-        merged['text'] = merged['text'].fillna('').astype(str)
-        return merged
+    train_df = train_df.reset_index()
+    train_df.rename(columns={'index': 'id'}, inplace=True)
 
-    train_df = build_split(train_ids)
-    dev_df   = build_split(dev_ids)
+    present_dev_ids = [id for id in dev_ids if id in dev_df.index]
+    dev_df = dev_df.loc[present_dev_ids].reset_index()
+    dev_df.rename(columns={'index': 'id'}, inplace=True)
 
     return train_df, dev_df
 
@@ -54,47 +60,60 @@ def prepare_test_data(test_file):
     return test_df
 
 
-def create_token_labels(text, span_label, tokenizer, max_length):
-    encoding = tokenizer(
-        text, truncation=True, max_length=max_length,
-        return_offsets_mapping=True, padding='max_length'
+def load_span_data(categories_file):
+    span_df = pd.read_csv(
+        categories_file,
+        sep='\t',
+        header=None,
+        names=['par_id', 'art_id', 'text', 'keyword', 'country_code',
+               'span_start', 'span_finish', 'span_text', 'pcl_category', 'num_annotators'],
+        engine='python',
+        quoting=3,
+        on_bad_lines='warn'
     )
-    input_ids      = encoding['input_ids']
-    attention_mask = encoding['attention_mask']
-    offsets        = encoding['offset_mapping']
+    spans_by_par = {}
+    for _, row in span_df.iterrows():
+        pid = row['par_id']
+        spans_by_par.setdefault(pid, []).append((row['span_start'], row['span_finish']))
+    return spans_by_par
 
-    if span_label is None or (isinstance(span_label, float) and np.isnan(span_label)):
-        token_labels = [0] * max_length
-    else:
-        span_text  = str(span_label)
-        span_start = text.find(span_text)
-        if span_start == -1:
-            token_labels = [0] * max_length
-        else:
-            span_end     = span_start + len(span_text)
-            token_labels = [
-                1 if (s < span_end and e > span_start) else 0
-                for s, e in offsets
-            ]
+
+def create_token_labels(text, spans, tokenizer, max_length):
+    encoding = tokenizer(text, truncation=True, max_length=max_length, return_offsets_mapping=True)
+    offsets = encoding['offset_mapping']
+    input_ids = encoding['input_ids']
+    attention_mask = encoding['attention_mask']
+
+    token_labels = [0] * len(input_ids)
+    for start, end in spans:
+        for i, (token_start, token_end) in enumerate(offsets):
+            if token_start is None or token_end is None:
+                continue
+            if token_start >= start and token_end <= end:
+                token_labels[i] = 1
+
+    pad_len = max_length - len(input_ids)
+    if pad_len > 0:
+        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        input_ids     = input_ids     + [pad_token_id] * pad_len
+        attention_mask = attention_mask + [0] * pad_len
+        token_labels  = token_labels  + [0] * pad_len
 
     return input_ids, attention_mask, token_labels
 
 
-def tokenize_with_spans(batch, tokenizer, max_length, spans_by_par=None):
+def tokenize_with_spans(batch, tokenizer, max_length, spans_by_par):
     input_ids_list, attention_mask_list, token_labels_list, labels_list = [], [], [], []
-
-    for text, label, span_label in zip(batch['text'], batch['label'], batch['span_label']):
-        input_ids, attention_mask, token_labels = create_token_labels(
-            text, span_label, tokenizer, max_length
-        )
+    for text, label, pid in zip(batch['text'], batch['label'], batch['id']):
+        spans = spans_by_par.get(pid, [])
+        input_ids, attention_mask, token_labels = create_token_labels(text, spans, tokenizer, max_length)
         input_ids_list.append(input_ids)
         attention_mask_list.append(attention_mask)
         token_labels_list.append(token_labels)
         labels_list.append(label)
-
     return {
-        'input_ids':      input_ids_list,
+        'input_ids': input_ids_list,
         'attention_mask': attention_mask_list,
-        'labels':         labels_list,
-        'token_labels':   token_labels_list,
+        'labels': labels_list,
+        'token_labels': token_labels_list,
     }

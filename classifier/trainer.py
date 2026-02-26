@@ -32,19 +32,6 @@ class PCLTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
         self.pos_weight = pos_weight
-        self.train_labels = train_labels
-
-
-    def _get_train_sampler(self):
-        if self.train_labels is None:
-            return super()._get_train_sampler()
-        class_sample_counts = np.bincount(self.train_labels)
-        sample_weights = 1.0 / class_sample_counts[self.train_labels]
-        return torch.utils.data.WeightedRandomSampler(
-            weights=torch.from_numpy(sample_weights),
-            num_samples=len(sample_weights),
-            replacement=True
-        )
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.get("labels")
@@ -105,25 +92,18 @@ def compute_metrics(p):
 if __name__ == "__main__":
     set_seed(127)
 
+    spans_by_par = load_span_data("Dont Patronize Me Categories.tsv")
+    
     train_df, dev_df = prepare_data(
         "dontpatronizeme_pcl.tsv",
         "SemEval 2022 Train Labels.csv",
-        "Semeval 2022 Dev Labels.csv"
+        "Semeval 2022 Dev Labels.csv",
+        spans_by_par=spans_by_par
     )
 
+    # prepare_data already resets index and has 'id' column, no need to do it again
     print("Train columns:", train_df.columns.tolist())
     print("Dev columns:",   dev_df.columns.tolist())
-    print(f"Train size: {len(train_df)}, Dev size: {len(dev_df)}")
-
-    # Compute pos_weight on original label distribution
-    from sklearn.utils.class_weight import compute_class_weight
-    class_weights = compute_class_weight(
-        class_weight='balanced',
-        classes=np.array([0, 1]),
-        y=train_df['label'].values
-    )
-    pos_weight = torch.tensor(class_weights[1], dtype=torch.float)
-    print(f"pos_weight: {pos_weight:.4f}")
 
     raw_datasets = DatasetDict({
         "train":      Dataset.from_pandas(train_df),
@@ -132,10 +112,12 @@ if __name__ == "__main__":
 
     MODEL_NAME = "microsoft/deberta-v3-base"
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     max_length = 256
     tokenized_datasets = raw_datasets.map(
-        lambda batch: tokenize_with_spans(batch, tokenizer, max_length),
+        lambda batch: tokenize_with_spans(batch, tokenizer, max_length, spans_by_par),
         batched=True,
     )
 
@@ -228,7 +210,6 @@ if __name__ == "__main__":
         trainer = PCLTrainer(
             alpha=alpha,
             pos_weight=pos_weight,
-            train_labels=np.array(train_df['label'].values),
             model=model,
             args=training_args,
             train_dataset=tokenized_datasets["train"],
