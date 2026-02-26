@@ -51,17 +51,20 @@ class PCLTrainer(Trainer):
         return (loss, seq_logits) if return_outputs else loss
 
     def prediction_step(
-        self,
-        model,
-        inputs,
-        prediction_loss_only,
-        ignore_keys=None
+    self,
+    model,
+    inputs,
+    prediction_loss_only,
+    ignore_keys=None
     ):
         labels = inputs.get("labels")
-        token_labels = inputs.pop("token_labels")
+
+        if "token_labels" in inputs:
+            inputs = inputs.copy()
+            inputs.pop("token_labels")
 
         with torch.no_grad():
-            seq_logits, token_logits = model(**inputs)
+            seq_logits, _ = model(**inputs)
 
         loss = None
         if labels is not None:
