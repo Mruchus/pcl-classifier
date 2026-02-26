@@ -1,5 +1,5 @@
 import torch.nn as nn
-from transformers import AutoModel, PreTrainedModel
+from transformers import AutoModel, PreTrainedModel, AutoConfig
 
 class PCLClassifier(PreTrainedModel):
     def __init__(self, model_name):
