@@ -151,7 +151,7 @@ if __name__ == "__main__":
         print(f"\n--- Testing params: lr={lr}, wd={wd}, accum={accum}, warmup={warmup}, alpha={alpha} ---")
 
         # create a fresh model for each run (custom multi‑task model)
-        model = PCLClassifier.from_pretrained(MODEL_NAME)
+        model = PCLClassifier(MODEL_NAME)
         model.to(device)
 
         # feed parameters to optimiser
