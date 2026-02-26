@@ -49,7 +49,18 @@ class PCLTrainer(Trainer):
 
         loss = self.alpha * seq_loss + (1 - self.alpha) * token_loss
         return (loss, (seq_logits, token_logits)) if return_outputs else loss
-
+    
+    def compute_metrics(p):
+        try:
+            seq_logits = p.predictions[0]
+            preds = (seq_logits.squeeze(-1) > 0).astype(int)
+            return {
+                "f1": f1_score(p.label_ids, preds, zero_division=0),
+                "num_pos_pred": int(np.sum(preds))
+            }
+        except Exception as e:
+            print(f"compute_metrics error: {e}, predictions type: {type(p.predictions)}, shape: {getattr(p.predictions, 'shape', 'N/A')}")
+            raise
 
 class CheckNaNGradCallback(TrainerCallback):
     def on_step_end(self, args, state, control, model=None, **kwargs):
@@ -180,11 +191,7 @@ if __name__ == "__main__":
             data_collator=DataCollatorWithPadding(tokenizer),
             optimizers=(optimizer, scheduler),
             callbacks=[CheckNaNGradCallback()],
-            compute_metrics=lambda p: {
-                # FIX: use threshold at 0 on raw logits (not argmax) for binary classification
-                "f1": f1_score(p.label_ids, (p.predictions[0].squeeze(-1) > 0).astype(int)),
-                "num_pos_pred": int(np.sum(p.predictions[0].squeeze(-1) > 0))
-            },
+            compute_metrics=compute_metrics,
         )
 
         trainer.train()
