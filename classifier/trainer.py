@@ -102,19 +102,13 @@ if __name__ == "__main__":
         spans_by_par=spans_by_par
     )
 
-    train_df_reset = train_df.reset_index()
-    dev_df_reset   = dev_df.reset_index()
-    if 'index' in train_df_reset.columns:
-        train_df_reset.rename(columns={'index': 'id'}, inplace=True)
-    if 'index' in dev_df_reset.columns:
-        dev_df_reset.rename(columns={'index': 'id'}, inplace=True)
-
-    print("Train columns:", train_df_reset.columns.tolist())
-    print("Dev columns:",   dev_df_reset.columns.tolist())
+    # prepare_data already resets index and has 'id' column, no need to do it again
+    print("Train columns:", train_df.columns.tolist())
+    print("Dev columns:",   dev_df.columns.tolist())
 
     raw_datasets = DatasetDict({
-        "train":      Dataset.from_pandas(train_df_reset),
-        "validation": Dataset.from_pandas(dev_df_reset),
+        "train":      Dataset.from_pandas(train_df),
+        "validation": Dataset.from_pandas(dev_df),
     })
 
     MODEL_NAME = "microsoft/deberta-v3-base"
