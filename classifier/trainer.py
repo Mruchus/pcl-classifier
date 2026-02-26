@@ -29,7 +29,7 @@ def set_seed(seed=127):
 
 set_seed(127)   # use seed 127
 
-class Trainer(Trainer):
+class PCLTrainer(Trainer):
     def __init__(self, alpha=0.5, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
@@ -67,13 +67,13 @@ class CheckNaNGradCallback(TrainerCallback):
 if __name__ == "__main__":
     # load and split data according to official train/dev IDs
     train_df, dev_df = prepare_data(
-        "../dontpatronizeme_pcl.tsv",
-        "../SemEval 2022 Train Labels.csv",
-        "../Semeval 2022 Dev Labels.csv"
+        "dontpatronizeme_pcl.tsv",
+        "SemEval 2022 Train Labels.csv",
+        "Semeval 2022 Dev Labels.csv"
     )
 
     # load span annotations from the categories file
-    spans_by_par = load_span_data("../Dont Patronize Me Categories.tsv")
+    spans_by_par = load_span_data("Dont Patronize Me Categories.tsv")
 
     raw_datasets = DatasetDict({
         "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
@@ -176,7 +176,7 @@ if __name__ == "__main__":
             remove_unused_columns=False,
         )
 
-        trainer = Trainer(
+        trainer = PCLTrainer(
             alpha=alpha,
             model=model,
             args=training_args,
