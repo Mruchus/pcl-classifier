@@ -49,18 +49,6 @@ class PCLTrainer(Trainer):
 
         loss = self.alpha * seq_loss + (1 - self.alpha) * token_loss
         return (loss, (seq_logits, token_logits)) if return_outputs else loss
-    
-    def compute_metrics(p):
-        try:
-            seq_logits = p.predictions[0]
-            preds = (seq_logits.squeeze(-1) > 0).astype(int)
-            return {
-                "f1": f1_score(p.label_ids, preds, zero_division=0),
-                "num_pos_pred": int(np.sum(preds))
-            }
-        except Exception as e:
-            print(f"compute_metrics error: {e}, predictions type: {type(p.predictions)}, shape: {getattr(p.predictions, 'shape', 'N/A')}")
-            raise
 
 class CheckNaNGradCallback(TrainerCallback):
     def on_step_end(self, args, state, control, model=None, **kwargs):
@@ -69,7 +57,19 @@ class CheckNaNGradCallback(TrainerCallback):
                 print(f"NaN gradient in {name} at step {state.global_step}")
                 control.should_training_stop = True
                 return control
-        return control
+        return control 
+
+def compute_metrics(p):
+    try:
+        seq_logits = p.predictions[0]
+        preds = (seq_logits.squeeze(-1) > 0).astype(int)
+        return {
+            "f1": f1_score(p.label_ids, preds, zero_division=0),
+            "num_pos_pred": int(np.sum(preds))
+        }
+    except Exception as e:
+        print(f"compute_metrics error: {e}, predictions type: {type(p.predictions)}, shape: {getattr(p.predictions, 'shape', 'N/A')}")
+        raise
 
 
 if __name__ == "__main__":
