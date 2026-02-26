@@ -33,11 +33,13 @@ class PCLTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        labels       = inputs.pop("labels")
-        token_labels = inputs.pop("token_labels")
-        seq_logits, token_logits = model(**inputs)
 
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.get("labels")           # GET not pop — Trainer needs labels afterwards
+        token_labels = inputs.pop("token_labels")  # pop is fine — Trainer doesn't need this
+
+        seq_logits, token_logits = model(**inputs)  # labels passed via **kwargs, absorbed harmlessly
+        
         loss_fct_seq = nn.BCEWithLogitsLoss()
         seq_loss = loss_fct_seq(seq_logits.squeeze(-1), labels.float())
 
