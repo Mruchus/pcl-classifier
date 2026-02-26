@@ -33,12 +33,12 @@ class PCLTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
 
-
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        labels = inputs.get("labels")           # GET not pop — Trainer needs labels afterwards
-        token_labels = inputs.pop("token_labels")  # pop is fine — Trainer doesn't need this
+        labels = inputs.get("labels")
+        token_labels = inputs.pop("token_labels")
 
-        seq_logits, token_logits = model(**inputs)  # labels passed via **kwargs, absorbed harmlessly
+        seq_logits, token_logits = model(**inputs)
+
         loss_fct_seq = nn.BCEWithLogitsLoss()
         seq_loss = loss_fct_seq(seq_logits.squeeze(-1), labels.float())
 
@@ -48,9 +48,27 @@ class PCLTrainer(Trainer):
 
         loss = self.alpha * seq_loss + (1 - self.alpha) * token_loss
 
-        # Only return seq_logits — returning the full tuple confuses the Trainer
-        # and causes compute_metrics to receive a malformed predictions structure
         return (loss, seq_logits) if return_outputs else loss
+
+    def prediction_step(
+        self,
+        model,
+        inputs,
+        prediction_loss_only,
+        ignore_keys=None
+    ):
+        labels = inputs.get("labels")
+        token_labels = inputs.pop("token_labels")
+
+        with torch.no_grad():
+            seq_logits, token_logits = model(**inputs)
+
+        loss = None
+        if labels is not None:
+            loss_fct = nn.BCEWithLogitsLoss()
+            loss = loss_fct(seq_logits.squeeze(-1), labels.float())
+
+        return (loss, seq_logits, labels)
 
 class CheckNaNGradCallback(TrainerCallback):
     def on_step_end(self, args, state, control, model=None, **kwargs):
@@ -193,12 +211,9 @@ if __name__ == "__main__":
 
         trainer.train()
 
+        # find optimal threshold on validation set
         predictions = trainer.predict(tokenized_datasets["validation"])
-
-        probs = torch.sigmoid(
-            torch.tensor(predictions.predictions)
-        ).squeeze(-1).numpy()
-
+        probs       = torch.sigmoid(torch.tensor(predictions.predictions[0])).squeeze(-1).numpy()
         true_labels = predictions.label_ids
 
         best_t, best_f1 = 0.5, 0.0
@@ -207,12 +222,9 @@ if __name__ == "__main__":
             if f1 > best_f1:
                 best_f1, best_t = f1, t
 
+        # test predictions using best validation threshold
         test_predictions = trainer.predict(test_tokenized)
-
-        test_probs = torch.sigmoid(
-            torch.tensor(test_predictions.predictions)
-        ).squeeze(-1).numpy()
-
+        test_probs = torch.sigmoid(torch.tensor(test_predictions.predictions[0])).squeeze(-1).numpy()
         test_preds = (test_probs > best_t).astype(int)
         dev_preds  = (probs > best_t).astype(int)
 
