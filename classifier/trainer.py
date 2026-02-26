@@ -35,7 +35,7 @@ class PCLTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop("labels")               # paragraph labels
         token_labels = inputs.pop("token_labels")   # token labels
         seq_logits, token_logits = model(**inputs)
@@ -98,8 +98,9 @@ if __name__ == "__main__":
 
     MODEL_NAME = "microsoft/deberta-v3-base"
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    # Ensure pad token is set (DeBERTa already has one, but just in case)
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token   # or tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        tokenizer.pad_token = tokenizer.eos_token
 
     # tokenise both splits, now with token‑level labels from spans
     max_length = 256
@@ -139,7 +140,8 @@ if __name__ == "__main__":
     param_combinations = list(itertools.product(lr_list, wd_list, accum_list, warmup_list, alpha_list))
     print(f"Total combinations: {len(param_combinations)}")
 
-    param_combinations = [(1e-6, 0.1, 2, 1500, 0.5)]
+    # For quick testing, you can restrict to one combination
+    # param_combinations = [(1e-6, 0.1, 2, 1500, 0.5)]
 
     best_f1_overall = 0.0
     best_params = None
@@ -153,7 +155,7 @@ if __name__ == "__main__":
         print(f"\n--- Testing params: lr={lr}, wd={wd}, accum={accum}, warmup={warmup}, alpha={alpha} ---")
 
         # create a fresh model for each run (custom multi‑task model)
-        model = PCLClassifier(MODEL_NAME)
+        model = PCLClassifier(MODEL_NAME)   # <-- direct instantiation, not from_pretrained
         model.to(device)
 
         # feed parameters to optimiser
