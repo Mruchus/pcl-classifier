@@ -146,7 +146,7 @@ if __name__ == "__main__":
     param_combinations = list(itertools.product(lr_list, wd_list, accum_list, warmup_list, alpha_list))
     print(f"Total combinations: {len(param_combinations)}")
 
-    param_combinations = [(3e-5, 0.1, 2, 1500, 0.5)]
+    param_combinations = [(1e-7, 0.1, 2, 1500, 0.5)]
 
     best_f1_overall  = 0.0
     best_params      = None
