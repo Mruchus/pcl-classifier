@@ -90,6 +90,15 @@ def create_token_labels(text, spans, tokenizer, max_length):
                 continue
             if token_start >= start and token_end <= end:
                 token_labels[i] = 1
+
+    # Pad to max_length so all sequences have uniform length
+    pad_len = max_length - len(input_ids)
+    if pad_len > 0:
+        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        input_ids = input_ids + [pad_token_id] * pad_len
+        attention_mask = attention_mask + [0] * pad_len
+        token_labels = token_labels + [0] * pad_len
+
     return input_ids, attention_mask, token_labels
 
 def tokenize_with_spans(batch, tokenizer, max_length, spans_by_par):

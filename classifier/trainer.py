@@ -98,6 +98,8 @@ if __name__ == "__main__":
 
     MODEL_NAME = "microsoft/deberta-v3-base"
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token   # or tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
     # tokenise both splits, now with token‑level labels from spans
     max_length = 256
