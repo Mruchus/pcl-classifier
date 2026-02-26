@@ -76,10 +76,9 @@ if __name__ == "__main__":
     spans_by_par = load_span_data("Dont Patronize Me Categories.tsv")
 
     raw_datasets = DatasetDict({
-        "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
-        "validation": Dataset.from_pandas(dev_df.reset_index(drop=True)),
-    })
-
+    "train": Dataset.from_pandas(train_df.reset_index()),
+    "validation": Dataset.from_pandas(dev_df.reset_index()),
+})
     MODEL_NAME = "microsoft/deberta-v3-base"
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
