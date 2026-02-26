@@ -24,6 +24,13 @@ def prepare_data(pcl_file, train_labels_file, dev_labels_file):
         df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     )
 
+    print(f"df.index.dtype: {df.index.dtype}")
+    print(f"First 5 dev_ids: {dev_ids[:5]}")
+    print(f"Type of first dev_id: {type(dev_ids[0])}")
+    print(f"Is 8640 in df.index? {8640 in df.index}")   # check specifically
+    print(f"Total dev IDs: {len(dev_ids)}")
+    print(f"Dev IDs present in df: {sum(df.index.isin(dev_ids))}")
+
     # loads train and dev IDs
     train_ids = pd.read_csv(train_labels_file)['par_id'].tolist()
     dev_ids = pd.read_csv(dev_labels_file)['par_id'].tolist()
@@ -32,6 +39,15 @@ def prepare_data(pcl_file, train_labels_file, dev_labels_file):
     # based on the paragraph IDs
     train_df = df[df.index.isin(train_ids)]
     dev_df = df[df.index.isin(dev_ids)]
+
+    # Before reordering, check if all dev_ids are in dev_df.index
+    missing = set(dev_ids) - set(dev_df.index)
+    if missing:
+        print(f"WARNING: Missing dev IDs: {missing}")
+        # Optionally, you can filter to only those present:
+        # dev_ids = [id for id in dev_ids if id in dev_df.index]
+    else:
+        print("All dev IDs present.")
 
     # ensure dev set is in the exact order that the ids are listed
     dev_df = dev_df.loc[dev_ids]
