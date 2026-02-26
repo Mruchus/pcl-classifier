@@ -196,8 +196,17 @@ if __name__ == "__main__":
             remove_unused_columns=False,
         )
 
-        pos_weight = class_weights_seq[1:2].to(device)
+        from sklearn.utils.class_weight import compute_class_weight
+
+        labels_train = tokenized_datasets["train"]["labels"]
+        class_weights = compute_class_weight(
+            class_weight='balanced',
+            classes=np.array([0, 1]),
+            y=np.array(labels_train)
+        )
         
+        pos_weight = torch.tensor(class_weights[1], dtype=torch.float).to(device)
+
         trainer = PCLTrainer(
             alpha=alpha,
             pos_weight=pos_weight,
