@@ -93,12 +93,14 @@ def compute_metrics(p):
 if __name__ == "__main__":
     set_seed(127)
 
+    spans_by_par = load_span_data("Dont Patronize Me Categories.tsv")
+    
     train_df, dev_df = prepare_data(
         "dontpatronizeme_pcl.tsv",
         "SemEval 2022 Train Labels.csv",
-        "Semeval 2022 Dev Labels.csv"
+        "Semeval 2022 Dev Labels.csv",
+        spans_by_par=spans_by_par
     )
-    spans_by_par = load_span_data("Dont Patronize Me Categories.tsv")
 
     train_df_reset = train_df.reset_index()
     dev_df_reset   = dev_df.reset_index()
