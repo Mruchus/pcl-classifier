@@ -29,6 +29,7 @@ def set_seed(seed=127):
 
 set_seed(127)   # use seed 127
 
+# ---------- Custom Trainer (multi‑task) ----------
 class PCLTrainer(Trainer):
     def __init__(self, alpha=0.5, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -53,6 +54,7 @@ class PCLTrainer(Trainer):
 
         return (loss, (seq_logits, token_logits)) if return_outputs else loss
 
+# ---------- Callback to check NaN gradients ----------
 class CheckNaNGradCallback(TrainerCallback):
     def on_step_end(self, args, state, control, model=None, **kwargs):
         # check for NaN gradients after each step
@@ -75,10 +77,25 @@ if __name__ == "__main__":
     # load span annotations from the categories file
     spans_by_par = load_span_data("Dont Patronize Me Categories.tsv")
 
+    # reset index to bring 'id' back as a column, but ensure it's named 'id'
+    train_df_reset = train_df.reset_index()   # no drop=True
+    dev_df_reset = dev_df.reset_index()
+
+    # if the index became a column named 'index', rename it to 'id'
+    if 'index' in train_df_reset.columns:
+        train_df_reset.rename(columns={'index': 'id'}, inplace=True)
+    if 'index' in dev_df_reset.columns:
+        dev_df_reset.rename(columns={'index': 'id'}, inplace=True)
+
+    # optional: print columns to confirm (remove after debugging)
+    print("Train columns:", train_df_reset.columns.tolist())
+    print("Dev columns:", dev_df_reset.columns.tolist())
+
     raw_datasets = DatasetDict({
-    "train": Dataset.from_pandas(train_df.reset_index()),
-    "validation": Dataset.from_pandas(dev_df.reset_index()),
-})
+        "train": Dataset.from_pandas(train_df_reset),
+        "validation": Dataset.from_pandas(dev_df_reset),
+    })
+
     MODEL_NAME = "microsoft/deberta-v3-base"
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
@@ -87,11 +104,12 @@ if __name__ == "__main__":
     tokenized_datasets = raw_datasets.map(
         lambda batch: tokenize_with_spans(batch, tokenizer, max_length, spans_by_par),
         batched=True,
-        remove_columns=raw_datasets["train"].column_names   # drop original text and metadata
+        # DO NOT remove columns here – we'll select later
     )
 
-    # only keep columns needed for training (token_labels is now included)
-    # the data collator will handle padding automatically
+    # keep only columns needed for training
+    keep_columns = ['input_ids', 'attention_mask', 'labels', 'token_labels']
+    tokenized_datasets = tokenized_datasets.select_columns(keep_columns)
 
     # compute weights for each class for the sequence loss (optional, can also tune alpha)
     labels_train = tokenized_datasets["train"]["labels"]

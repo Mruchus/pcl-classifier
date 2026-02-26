@@ -1,6 +1,5 @@
 import pandas as pd
-import torch
-from datasets import Dataset, DatasetDict
+import numpy as np
 
 def prepare_data(pcl_file, train_labels_file, dev_labels_file):
     # load the main dataset
@@ -52,7 +51,6 @@ def prepare_test_data(test_file):
         test_df['keyword'].fillna('') + " [SEP] " +
         test_df['text'].str.replace(r'@@\d+', '', regex=True).str.strip()
     )
-
     return test_df
 
 def load_span_data(categories_file):
@@ -78,6 +76,7 @@ def load_span_data(categories_file):
     return spans_by_par
 
 def create_token_labels(text, spans, tokenizer, max_length):
+    # tokenise with offsets
     encoding = tokenizer(text, truncation=True, max_length=max_length, return_offsets_mapping=True)
     offsets = encoding['offset_mapping']
     input_ids = encoding['input_ids']
@@ -86,6 +85,7 @@ def create_token_labels(text, spans, tokenizer, max_length):
     token_labels = [0] * len(input_ids)
     for start, end in spans:
         for i, (token_start, token_end) in enumerate(offsets):
+            # skip special tokens (offset (0,0) for [CLS], etc.)
             if token_start is None or token_end is None:
                 continue
             if token_start >= start and token_end <= end:
