@@ -35,8 +35,8 @@ def prepare_data(pcl_file, train_labels_file, dev_labels_file):
         names=cols, index_col='id', quoting=3
     )
 
-    # drop rows were text or label is missing
-    df = df.dropna(subset=['text', 'label'])
+    # empty string for any missing texts
+    df['text'] = df['text'].fillna('')
 
     # converts the original multi‑class labels (0–4) into binary labels
     df['label'] = df['label'].apply(lambda x: 1 if x >= 2 else 0)
@@ -58,9 +58,11 @@ def prepare_data(pcl_file, train_labels_file, dev_labels_file):
     train_df = df[df.index.isin(train_ids)]
     dev_df = df[df.index.isin(dev_ids)]
 
-    # cut out very short texts (less than 10 characters)
+    # cut out very short texts (less than 10 characters) from TRAIN only
     train_df = train_df[train_df['text'].str.strip() != '']
     train_df = train_df[train_df['text'].str.len() > 10]
+
+    dev_df = dev_df.loc[dev_ids]
 
     return train_df, dev_df
 
@@ -100,7 +102,7 @@ class PCLTrainer(Trainer):
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
-def train_and_evaluate(params, train_dataset, eval_dataset, test_tokenized, class_weights, device):
+def train_and_evaluate(params, train_dataset, eval_dataset, test_tokenized, class_weights, device, tokenizer):
     # create a fresh model for each run
     model = AutoModelForSequenceClassification.from_pretrained("microsoft/deberta-v3-base", num_labels=2).to(device)
     
@@ -183,10 +185,9 @@ def train_and_evaluate(params, train_dataset, eval_dataset, test_tokenized, clas
     dev_preds = (probs > best_t).astype(int)
 
     # clean up to free memory
-    del model
     torch.cuda.empty_cache()
 
-    return best_f1, best_t, dev_preds, test_preds, predictions.label_ids
+    return best_f1, best_t, dev_preds, test_preds, predictions.label_ids, model
 
 if __name__ == "__main__":
     # load and split data according to official train/dev IDs
@@ -267,13 +268,14 @@ if __name__ == "__main__":
         }
         print(f"\n--- Testing params: {params} ---")
         try:
-            f1, thresh, dev_preds, test_preds, true_labels = train_and_evaluate(
+            f1, thresh, dev_preds, test_preds, true_labels, model= train_and_evaluate(
                 params,
                 tokenized_datasets["train"],
                 tokenized_datasets["validation"],
                 test_tokenized,
                 class_weights,
-                device
+                device,
+                tokenizer
             )
             print(f"--> Best F1 = {f1:.4f} at threshold {thresh:.2f}")
             if f1 > best_f1_overall:
@@ -283,6 +285,9 @@ if __name__ == "__main__":
                 best_dev_preds = dev_preds.copy()
                 best_test_preds = test_preds.copy()
                 best_true_labels = true_labels.copy()
+                # save the best model
+                model.save_pretrained("./best_model")
+                tokenizer.save_pretrained("./best_model")
         except Exception as e:
             print(f"Run failed: {e}")
             continue
