@@ -286,8 +286,8 @@ if __name__ == "__main__":
                 best_test_preds = test_preds.copy()
                 best_true_labels = true_labels.copy()
                 # save the best model
-                model.save_pretrained("./best_model")
-                tokenizer.save_pretrained("./best_model")
+                model.save_pretrained("./BestModel")
+                tokenizer.save_pretrained("./BestModel")
         except Exception as e:
             print(f"Run failed: {e}")
             continue
